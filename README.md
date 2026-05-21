@@ -6,6 +6,8 @@ This repository contains **only the MCP client**. It does not ship server creden
 
 ## Online install (needs internet)
 
+**Requires Python 3.10+** and `pip`.
+
 Get your manifest URL from **RightSight → Open Integration Gateway → MCP → Install MCP** (copy the setup command), then run:
 
 ```bash
