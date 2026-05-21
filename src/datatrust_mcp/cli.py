@@ -405,6 +405,16 @@ def cmd_setup(args) -> int:
           f"envs=[{', '.join(manifest['environments'].keys())}], "
           f"default={manifest['default_environment']}")
     print()
+    print("[datatrust-mcp setup] clearing cached sign-in sessions (fresh login required)")
+    for env_name in manifest["environments"]:
+        tok = oauth.load_token(env_name)
+        if tok:
+            who = tok.get("user_email") or "(unknown)"
+            print(f"  ✓ cleared {env_name} session ({who})")
+        oauth.clear_token(env_name)
+    oauth.clear_token(None)
+    oauth.clear_token("default")
+    print()
     print("[datatrust-mcp setup] registering with AI clients")
     report: list[str] = []
     for adapter in CLIENT_ADAPTERS:
@@ -444,7 +454,7 @@ def cmd_status(args) -> int:
     for name in reg.names():
         env = reg.environments[name]
         tok = oauth.load_token(name)
-        who = (tok or {}).get("user_email", "—") or "—"
+        who = (tok or {}).get("user_email") or "—"
         print(f"{name:<10}  {env.label:<14}  {who:<32}  {env.dotnet_url}")
     return 0
 

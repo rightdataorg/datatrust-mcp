@@ -143,6 +143,47 @@ async def _ensure_token(env: cfg.Environment) -> str:
 # Upstream call (per-env)
 # ---------------------------------------------------------------------------
 
+def _looks_like_auth_failure(resp: httpx.Response) -> bool:
+    """True when the gateway redirected to login or returned a non-API body."""
+    if resp.status_code in (401, 403):
+        return True
+    if resp.status_code in (301, 302, 303, 307, 308):
+        return True
+    if not resp.content or not resp.content.strip():
+        return True
+    ct = (resp.headers.get("content-type") or "").lower()
+    if "text/html" in ct:
+        return True
+    return False
+
+
+def _invalidate_session(env: cfg.Environment) -> None:
+    _session_tokens.pop(env.name, None)
+    oauth.clear_token(env.name)
+
+
+def _parse_gateway_body(resp: httpx.Response, tool_name: str, env_label: str) -> dict[str, Any]:
+    try:
+        body = resp.json()
+    except json.JSONDecodeError as exc:
+        snippet = (resp.text or "")[:200]
+        raise RuntimeError(
+            f"DataTrust gateway for '{env_label}' returned non-JSON (HTTP {resp.status_code}). "
+            f"This usually means the server redirected to a login page — redeploy the latest "
+            f"DataTrust build with MCP API routes enabled. Body starts with: {snippet!r}"
+        ) from exc
+
+    if body.get("isError"):
+        err_text = body.get("content", [{}])[0].get("text", "Unknown upstream error")
+        raise RuntimeError(f"Upstream tool error ({tool_name} on '{env_label}'): {err_text}")
+
+    text_payload = body.get("content", [{}])[0].get("text", "{}")
+    try:
+        return json.loads(text_payload)
+    except json.JSONDecodeError:
+        return {"raw": text_payload}
+
+
 async def _call_upstream(
     client: httpx.AsyncClient,
     env: cfg.Environment,
@@ -159,8 +200,10 @@ async def _call_upstream(
 
     async def _attempt() -> httpx.Response:
         return await client.post(
-            url, headers=_auth_headers(env),
+            url,
+            headers=_auth_headers(env),
             json={"name": name, "arguments": arguments},
+            follow_redirects=False,
         )
 
     try:
@@ -172,26 +215,29 @@ async def _call_upstream(
             f"Underlying error: {exc}"
         ) from exc
 
-    if resp.status_code == 401:
-        # Session rejected — drop it and re-OAuth once.
-        _session_tokens.pop(env.name, None)
-        oauth.clear_token(env.name)
+    if _looks_like_auth_failure(resp):
+        _invalidate_session(env)
         await _ensure_token(env)
-        resp = await _attempt()
+        try:
+            resp = await _attempt()
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                f"Could not reach DataTrust .NET gateway for env '{env.label}' at {url}. "
+                f"Underlying error: {exc}"
+            ) from exc
+
+    if _looks_like_auth_failure(resp):
+        loc = resp.headers.get("location", "")
+        hint = f" Redirected to {loc}." if loc else ""
+        raise RuntimeError(
+            f"DataTrust sign-in required for '{env.label}' (HTTP {resp.status_code}).{hint} "
+            "Complete the browser login when prompted, then retry."
+        )
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"FastAPI returned {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(f"Gateway returned {resp.status_code}: {resp.text[:500]}")
 
-    body = resp.json()
-    if body.get("isError"):
-        err_text = body.get("content", [{}])[0].get("text", "Unknown upstream error")
-        raise RuntimeError(f"Upstream tool error ({name} on '{env.label}'): {err_text}")
-
-    text_payload = body.get("content", [{}])[0].get("text", "{}")
-    try:
-        return json.loads(text_payload)
-    except json.JSONDecodeError:
-        return {"raw": text_payload}
+    return _parse_gateway_body(resp, name, env.label)
 
 
 # ---------------------------------------------------------------------------
@@ -458,7 +504,12 @@ async def _list_environments() -> dict:
             "dotnet_url": env.dotnet_url,
             "is_default": name == reg.default,
             "signed_in": bool(token and token.get("access_token")),
-            "signed_in_as": (token or {}).get("user_email"),
+            "signed_in_as": (token or {}).get("user_email") if token else None,
+            "note": (
+                "No cached session — first data tool call opens browser for your DataTrust login."
+                if not (token and token.get("access_token"))
+                else "Session cached locally; gateway may still require re-login if expired."
+            ),
         })
     return {
         "customer": reg.customer,
