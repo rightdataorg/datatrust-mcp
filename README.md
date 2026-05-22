@@ -77,6 +77,36 @@ Every tool accepts optional `environment` (e.g. `"prod"`). Omit to use the defau
 - **No secrets in this repo:** credentials live only on the customer's DataTrust deployment and in the user's local token cache (`chmod 0600`).
 - **Gateway-only:** the client talks to `{dotnet_url}/api/mcp/v1/*` and `/api/MCPAuth/*` — not FastAPI or databases directly.
 
+## CI / Microsoft Copilot mode (service tokens)
+
+Headless callers — CI pipelines, GitHub Actions, n8n flows, and the
+**Microsoft Copilot Studio agent** that publishes DataTrust to Microsoft
+Teams and M365 Copilot Chat — should NOT use the per-user device-code OAuth
+flow. Instead, an admin mints a long-lived **service token**
+(`dtmcp_svc_*`) from the DataTrust UI:
+
+  RightSight → Open Integration Gateway → MCP → Clients → Service tokens → Mint token
+
+The CLI accepts the same token on the environment variable already
+documented in `.env.example`:
+
+```bash
+export DATATRUST_API_KEY=dtmcp_svc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+export DATATRUST_MCP_ALLOW_SHARED_KEY=1
+datatrust-mcp setup https://datatrust.example.com/Rightdata/api/MCPInstall/Config
+```
+
+When `DATATRUST_API_KEY` is set, every call goes out with `x-api-key:
+<that token>` and the device-code browser flow is skipped entirely. The
+gateway recognises `dtmcp_svc_*` tokens (`TokenType='service'`) and audit-logs
+the call as `Principal = svc:<token name>`, not a user email.
+
+For the Microsoft Copilot Studio integration you do not install this CLI
+at all — Copilot Studio talks to `POST {dotnet_url}/api/mcp/v1/mcp`
+(Streamable HTTP) directly. See
+[`DataTrust/docs/copilot/INSTALL.md`](https://github.com/rightdataorg/datatrust/blob/main/docs/copilot/INSTALL.md)
+for the customer-admin runbook.
+
 See [`SECURITY.md`](SECURITY.md) for the full threat model (includes server-side guards deployed with DataTrust).
 
 ## Customer admin (server side)
