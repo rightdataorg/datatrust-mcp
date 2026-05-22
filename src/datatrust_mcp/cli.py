@@ -366,15 +366,14 @@ def _validate_manifest(m: dict) -> dict:
     for name, body in envs.items():
         if not isinstance(name, str) or not isinstance(body, dict):
             continue
-        fapi = (body.get("fastapi_url") or "").strip().rstrip("/")
         dnet = (body.get("dotnet_url") or "").strip().rstrip("/")
         if not dnet:
             continue
-        if not fapi:
-            fapi = dnet.replace(":5000", ":8000")
+        # v1.2+ manifests no longer expose fastapi_url to end users. The
+        # stdio MCP talks only to the .NET gateway (dotnet_url); the
+        # .NET app proxies onward to FastAPI server-side.
         clean_envs[name] = {
             "label": body.get("label") or name,
-            "fastapi_url": fapi,
             "dotnet_url": dnet,
         }
     if not clean_envs:
@@ -516,7 +515,6 @@ def cmd_envs(args) -> int:
         out.append({
             "name": name,
             "label": env.label,
-            "fastapi_url": env.fastapi_url,
             "dotnet_url": env.dotnet_url,
             "is_default": name == reg.default,
             "signed_in_as": (tok or {}).get("user_email"),

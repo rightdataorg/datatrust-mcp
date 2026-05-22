@@ -500,7 +500,6 @@ async def _list_environments() -> dict:
         out.append({
             "name": name,
             "label": env.label,
-            "fastapi_url": env.fastapi_url,
             "dotnet_url": env.dotnet_url,
             "is_default": name == reg.default,
             "signed_in": bool(token and token.get("access_token")),

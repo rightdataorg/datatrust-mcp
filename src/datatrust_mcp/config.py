@@ -49,14 +49,15 @@ class Environment:
 
     `dotnet_url` is the single endpoint the stdio MCP needs — it's the
     .NET gateway that fronts auth + audit + the tool-execution proxy.
-    `fastapi_url` is retained on the dataclass for diagnostics / legacy
-    setups, but the runtime no longer makes user-facing calls to it.
+    `fastapi_url` is kept as an optional, defaulted field strictly for
+    backward compatibility with v1.0/v1.1 manifests that still include
+    it; the runtime never reads it and v1.2+ manifests omit it.
     """
 
     name: str
     label: str
-    fastapi_url: str   # optional in the manifest; kept for legacy + diag
     dotnet_url: str
+    fastapi_url: str = ""   # deprecated; default empty so v1.2+ manifests load cleanly
 
     def token_path(self) -> Path:
         TOKENS_DIR.mkdir(parents=True, exist_ok=True)
