@@ -342,13 +342,59 @@ def _uninstall_from_clients(report: list[str]) -> None:
 # ---------------------------------------------------------------------------
 
 def _fetch_manifest(src: str) -> dict:
-    """Accepts a URL or a local file path. Returns the parsed JSON manifest."""
+    """Accepts a URL or a local file path. Returns the parsed JSON manifest.
+
+    On non-JSON responses we surface the specific deployment misconfiguration
+    (missing PathBase, hitting the auth-gated /Config instead of
+    /PublicConfig, wrong host, etc.) rather than dumping a JSONDecodeError.
+    """
     if src.startswith(("http://", "https://")):
-        with httpx.Client(timeout=30.0, verify=False) as client:
+        with httpx.Client(timeout=30.0, verify=False, follow_redirects=True) as client:
             r = client.get(src)
         if r.status_code >= 400:
             raise RuntimeError(f"GET {src} -> HTTP {r.status_code}: {r.text[:200]}")
-        return r.json()
+        ctype = (r.headers.get("content-type") or "").lower()
+        body_preview = r.text[:200].strip()
+        final_url = str(r.url)
+        if "json" not in ctype:
+            hints = []
+            looks_like_login = "datatrust login" in body_preview.lower() \
+                or "account/login" in final_url.lower() \
+                or "identity/account/login" in final_url.lower()
+            if looks_like_login:
+                hints.append(
+                    "Endpoint requires login. Use the public manifest instead — "
+                    "replace `/Config` with `/PublicConfig` in the URL."
+                )
+            if "/Rightdata" not in src and "/Rightdata" in final_url:
+                hints.append(
+                    "Server is hosted under a PathBase. Include it in your URL, e.g. "
+                    "`/Rightdata/api/MCPInstall/PublicConfig`."
+                )
+            if src.startswith("http://") and final_url.startswith("https://"):
+                hints.append(
+                    "Server redirected http:// to https://. Use the https:// URL directly."
+                )
+            if not hints:
+                hints.append(
+                    "Server returned non-JSON. Verify the URL points at "
+                    "`<base>/api/MCPInstall/PublicConfig` (or `/Config` only if you "
+                    "have a browser session) and that the deployment exposes the "
+                    "MCPInstall controller."
+                )
+            raise RuntimeError(
+                f"GET {src} returned non-JSON (content-type={ctype or 'unset'}, "
+                f"final URL={final_url}).\n"
+                + "\n".join(f"  • {h}" for h in hints)
+                + f"\nFirst 200 chars of body: {body_preview!r}"
+            )
+        try:
+            return r.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"GET {src} returned 200 but the body wasn't valid JSON: {exc}.\n"
+                f"First 200 chars: {body_preview!r}"
+            ) from exc
     p = Path(src).expanduser()
     if not p.exists():
         raise FileNotFoundError(f"{src!r} is neither a URL nor an existing file")
