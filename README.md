@@ -87,8 +87,20 @@ flow. Instead, an admin mints a long-lived **service token**
 
   RightSight → Open Integration Gateway → MCP → Clients → Service tokens → Mint token
 
-The CLI accepts the same token on the environment variable already
-documented in `.env.example`:
+The simplest way to roll this out to every AI client in one command is the
+`--api-key` flag on `setup` — it writes the token straight into each client's
+MCP config (Cursor, Claude, Copilot, Windsurf, Gemini, Zed, Cline), so there is
+no per-user browser sign-in and nothing to export:
+
+```bash
+pip install git+https://github.com/rightdataorg/datatrust-mcp.git
+datatrust-mcp setup https://datatrust.example.com/Rightdata/api/MCPInstall/Config \
+  --api-key dtmcp_svc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# restart your AI client — done.
+```
+
+Alternatively, set the same token as environment variables (also documented in
+`.env.example`) before running `setup`:
 
 ```bash
 export DATATRUST_API_KEY=dtmcp_svc_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

@@ -251,6 +251,13 @@ PASSTHROUGH = {
     "list_dq_jobs", "get_drift_events", "workspace_summary",
     "propose_scenarios", "answer_clarifications", "list_pending_scenarios",
     "confirm_and_create_scenarios", "list_connection_profiles",
+    # .NET-native tools — implemented in the DataTrust gateway, not FastAPI.
+    # The MCP client treats them like any other gateway passthrough.
+    "list_scenarios", "get_scenario", "run_scenario",
+    "get_scenario_run_status", "get_scenario_exceptions",
+    "list_query_chains", "get_query_chain", "run_query_chain",
+    "get_query_results",
+    "run_dq_job", "get_dq_job_status",
 }
 
 
@@ -403,6 +410,112 @@ TOOLS: list[Tool] = [
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {"limit": {"type": "number", "default": 50}},
+        })),
+    # ----- .NET-native: scenarios / FDR ------------------------------------
+    Tool(name="list_scenarios",
+        description="List DataTrust reconciliation (FDR/validation) scenarios. Optionally filter by name search or folder id.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "folderId": {"type": "number"},
+                "limit": {"type": "number", "default": 25},
+            },
+        })),
+    Tool(name="get_scenario",
+        description="Get the definition of one scenario by id (header, type, thresholds, owner, latest session).",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"scenarioId": {"type": "number"}},
+            "required": ["scenarioId"],
+        })),
+    Tool(name="run_scenario",
+        description="Execute a scenario now. Returns the new session status. Only call after explicit user approval.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "scenarioId": {"type": "number"},
+                "connectionId": {"type": "string"},
+            },
+            "required": ["scenarioId"],
+        })),
+    Tool(name="get_scenario_run_status",
+        description="Recent execution sessions for a scenario, with status code and message.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "scenarioId": {"type": "number"},
+                "limit": {"type": "number", "default": 10},
+            },
+            "required": ["scenarioId"],
+        })),
+    Tool(name="get_scenario_exceptions",
+        description="Result/exception summary for a scenario's session(s) (status, message, pass/fail).",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "scenarioId": {"type": "number"},
+                "sessionId": {"type": "number"},
+            },
+            "required": ["scenarioId"],
+        })),
+    # ----- .NET-native: query chains ---------------------------------------
+    Tool(name="list_query_chains",
+        description="List query chains in the DataTrust query builder. Optionally filter by name search.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "limit": {"type": "number", "default": 25},
+            },
+        })),
+    Tool(name="get_query_chain",
+        description="Get one query / query chain by id (name, profile, SQL text, type).",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"queryId": {"type": "number"}},
+            "required": ["queryId"],
+        })),
+    Tool(name="run_query_chain",
+        description="Execute a query chain now. Returns the run status. Only call after explicit user approval.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "queryId": {"type": "number"},
+                "connectionId": {"type": "string"},
+            },
+            "required": ["queryId"],
+        })),
+    Tool(name="get_query_results",
+        description="Recent execution sessions / results for a query or query chain.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "queryId": {"type": "number"},
+                "limit": {"type": "number", "default": 10},
+            },
+            "required": ["queryId"],
+        })),
+    # ----- .NET-native: data quality execution -----------------------------
+    Tool(name="run_dq_job",
+        description="Trigger a Data Quality job (submitted to the execution engine). Only call after explicit user approval.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "jobId": {"type": "number"},
+                "connectionId": {"type": "string"},
+            },
+            "required": ["jobId"],
+        })),
+    Tool(name="get_dq_job_status",
+        description="Status / latest run result of a Data Quality job. Pass runId for a specific run, else returns the summary.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "jobId": {"type": "number"},
+                "runId": {"type": "number"},
+            },
+            "required": ["jobId"],
         })),
     Tool(name="summarize_dq_for_object",
         description="Composite health report: score + failing rules + drift.",

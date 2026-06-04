@@ -45,6 +45,11 @@ from . import oauth
 SERVER_NAME = "datatrust"
 HOME = Path.home()
 
+# Extra env vars injected into every client's MCP server entry. Populated by
+# `setup --api-key ...` so a single command configures all AI clients to use a
+# shared service token (no per-user OAuth). Empty by default.
+_INSTALL_ENV: dict[str, str] = {}
+
 # Default install binary path — resolved at setup time so `pip install`
 # and `python -m datatrust_mcp setup` both register the correct launcher.
 def _installed_binary() -> str:
@@ -138,14 +143,18 @@ def _write_json(p: Path, data: dict) -> None:
 
 
 def _server_entry() -> dict:
-    """The MCP server spec to insert into each client's config."""
+    """The MCP server spec to insert into each client's config.
+
+    `env` is empty by default — the binary reads environments.json from
+    ~/.config/datatrust-mcp at startup and does per-user OAuth. When
+    `setup --api-key` is used, _INSTALL_ENV carries the shared service token
+    (DATATRUST_API_KEY + DATATRUST_MCP_ALLOW_SHARED_KEY) so every client
+    authenticates with one token and no browser login.
+    """
     return {
         "command": _installed_binary(),
         "args": [],
-        # No env vars needed — the binary reads environments.json from
-        # ~/.config/datatrust-mcp at startup. Keeping env empty means
-        # there's nothing for Claude Desktop's UI to silently rewrite.
-        "env": {},
+        "env": dict(_INSTALL_ENV),
     }
 
 
@@ -227,7 +236,10 @@ def _install_into_zed(report: list[str]) -> None:
     data = _read_json(p)
     # Zed uses `context_servers` instead of `mcpServers`, and wraps the
     # command/args under a `command` sub-object.
-    entry = {"command": {"path": _installed_binary(), "args": []}}
+    cmd_obj = {"path": _installed_binary(), "args": []}
+    if _INSTALL_ENV:
+        cmd_obj["env"] = dict(_INSTALL_ENV)
+    entry = {"command": cmd_obj}
     data.setdefault("context_servers", {})[SERVER_NAME] = entry
     _write_json(p, data)
     report.append(f"  ✓ Zed                {p}")
@@ -249,10 +261,15 @@ def _install_into_codex_cli(report: list[str]) -> None:
     if not shutil.which("codex") and not _codex_cli_config().exists():
         report.append("  (skip) Codex CLI      `codex` not on PATH — install OpenAI Codex CLI first")
         return
+    env_toml = ""
+    if _INSTALL_ENV:
+        kv = ", ".join(f'{k} = "{v}"' for k, v in _INSTALL_ENV.items())
+        env_toml = f"env = {{ {kv} }}\n"
     snippet = (
         f"[mcp_servers.{SERVER_NAME}]\n"
         f'command = "{_installed_binary()}"\n'
         f"args = []\n"
+        f"{env_toml}"
     )
     report.append(
         f"  ⚠ Codex CLI         add this block to ~/.codex/config.toml manually:\n"
@@ -265,11 +282,16 @@ def _install_into_continue(report: list[str]) -> None:
     if not _continue_config_yaml().parent.exists() and not (HOME / ".continue").exists():
         report.append("  (skip) Continue       ~/.continue not found — install Continue extension first")
         return
+    env_yaml = ""
+    if _INSTALL_ENV:
+        env_lines = "".join(f"      {k}: {v}\n" for k, v in _INSTALL_ENV.items())
+        env_yaml = f"    env:\n{env_lines}"
     snippet = (
         f"mcpServers:\n"
         f"  - name: {SERVER_NAME}\n"
         f"    command: {_installed_binary()}\n"
         f"    args: []\n"
+        f"{env_yaml}"
     )
     report.append(
         f"  ⚠ Continue          add this to ~/.continue/config.yaml under `mcpServers`:\n"
@@ -442,6 +464,14 @@ def _validate_manifest(m: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 def cmd_setup(args) -> int:
+    # Shared service-token mode: when --api-key is given, every client entry
+    # is written with the token in env, so there's no per-user browser login.
+    api_key = getattr(args, "api_key", None)
+    _INSTALL_ENV.clear()
+    if api_key:
+        _INSTALL_ENV["DATATRUST_API_KEY"] = api_key.strip()
+        _INSTALL_ENV["DATATRUST_MCP_ALLOW_SHARED_KEY"] = "1"
+
     print(f"[datatrust-mcp setup] fetching manifest from {args.source}")
     manifest = _validate_manifest(_fetch_manifest(args.source))
     saved = cfg.write_environments_file(manifest)
@@ -473,11 +503,19 @@ def cmd_setup(args) -> int:
     print("[datatrust-mcp setup] done")
     print(f"  Binary: {_installed_binary()}")
     print(f"  Config: {saved}")
-    print(
-        "\nNext step: restart Claude Desktop / Cursor / Copilot. Your first "
-        "tool call per environment will open a browser for DataTrust sign-in. "
-        "Tokens are then cached for 30 days."
-    )
+    if _INSTALL_ENV:
+        print(
+            "\nShared service token configured for every client "
+            "(DATATRUST_API_KEY). \nNext step: restart Claude Desktop / Cursor / "
+            "Copilot. No browser sign-in is needed — all tool calls use the "
+            "shared token."
+        )
+    else:
+        print(
+            "\nNext step: restart Claude Desktop / Cursor / Copilot. Your first "
+            "tool call per environment will open a browser for DataTrust sign-in. "
+            "Tokens are then cached for 30 days."
+        )
     return 0
 
 
@@ -652,6 +690,11 @@ def main(argv: list[str] | None = None) -> int:
     p_setup = sub.add_parser("setup", help="install/refresh from manifest URL or file")
     p_setup.add_argument("source",
         help="URL like https://datatrust.acme/api/MCPInstall/Config OR a local manifest .json")
+    p_setup.add_argument("--api-key", "--service-token", dest="api_key", default=None,
+        help="Shared service token (dtmcp_svc_*). When set, every AI client is "
+             "configured to authenticate with this one token instead of per-user "
+             "OAuth — no browser sign-in. Writes DATATRUST_API_KEY + "
+             "DATATRUST_MCP_ALLOW_SHARED_KEY into each client's MCP entry.")
     p_setup.set_defaults(func=cmd_setup)
 
     p_status = sub.add_parser("status", help="show configured envs + signed-in state")
