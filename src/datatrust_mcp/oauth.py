@@ -33,6 +33,20 @@ TOKEN_DIR = Path(os.path.expanduser("~/.config/datatrust-mcp"))
 LEGACY_TOKEN_PATH = TOKEN_DIR / "token"
 
 
+def verify_tls() -> bool:
+    """Whether httpx should verify TLS certificates for DataTrust calls.
+
+    Defaults to False to (a) stay consistent with the install/setup path
+    (cli.py uses verify=False) and (b) work with internal DataTrust hosts
+    that present self-signed or incomplete-chain certs — Python's certifi
+    bundle rejects those even when the OS keychain accepts them. Set
+    DATATRUST_MCP_VERIFY_TLS=1 (or true/yes/on) to enforce strict
+    verification on deployments with fully-valid public certs.
+    """
+    v = (os.environ.get("DATATRUST_MCP_VERIFY_TLS") or "").strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
 def _token_path_for(env_name: str | None) -> Path:
     """Return the on-disk path for a given environment's cached token.
     If env_name is None / 'default', honor the legacy path so existing
@@ -206,7 +220,7 @@ def run_oauth_flow(
         raise RuntimeError("DataTrust sign-in finished without a code.")
 
     # Exchange the code for a session token
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0, verify=verify_tls()) as client:
         resp = client.post(
             f"{base}/api/MCPAuth/Token",
             json={"code": server_state["code"]},
@@ -323,7 +337,7 @@ def run_device_flow(
     # instead of silently following it into a login HTML page and then
     # blowing up on .json().
     init_url = f"{base}/api/MCPAuth/Device/Init"
-    with httpx.Client(timeout=30.0, follow_redirects=False) as client:
+    with httpx.Client(timeout=30.0, follow_redirects=False, verify=verify_tls()) as client:
         init_resp = client.post(
             init_url,
             json={"client_name": client_name or "datatrust-mcp"},
@@ -359,7 +373,7 @@ def run_device_flow(
     while time.time() < deadline:
         time.sleep(cur_interval)
         try:
-            with httpx.Client(timeout=15.0, follow_redirects=False) as client:
+            with httpx.Client(timeout=15.0, follow_redirects=False, verify=verify_tls()) as client:
                 resp = client.post(
                     token_url,
                     json={"device_code": device_code},

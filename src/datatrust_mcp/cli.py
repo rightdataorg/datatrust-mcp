@@ -29,6 +29,7 @@ import os
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from pathlib import Path
 from typing import Iterable
 
@@ -191,16 +192,31 @@ def _install_into_claude_code(report: list[str]) -> None:
     # The Claude Code CLI manages MCPs via `claude mcp add`. We invoke it
     # if available, falling back to writing the JSON directly.
     if shutil.which("claude"):
-        try:
-            subprocess.run(
+        def _add_json() -> subprocess.CompletedProcess:
+            return subprocess.run(
                 ["claude", "mcp", "add-json", "--scope", "user", SERVER_NAME,
                  json.dumps(_server_entry())],
                 check=True, capture_output=True, text=True,
             )
+        try:
+            _add_json()
             report.append(f"  ✓ Claude Code        registered via `claude mcp add-json`")
             return
         except subprocess.CalledProcessError as exc:
-            report.append(f"  (warn) Claude Code   `claude mcp add-json` failed: {exc.stderr.strip()[:120]}")
+            stderr = (exc.stderr or "").strip()
+            # `add-json` refuses to overwrite an existing entry. Re-running
+            # setup is expected to be idempotent, so remove the stale entry
+            # and re-add rather than surfacing a scary warning.
+            if "already exists" in stderr.lower():
+                try:
+                    subprocess.run(["claude", "mcp", "remove", "--scope", "user", SERVER_NAME],
+                                   check=True, capture_output=True, text=True)
+                    _add_json()
+                    report.append(f"  ✓ Claude Code        re-registered via `claude mcp add-json`")
+                    return
+                except subprocess.CalledProcessError as exc2:
+                    stderr = (exc2.stderr or "").strip() or stderr
+            report.append(f"  (warn) Claude Code   `claude mcp add-json` failed: {stderr[:120]}")
     p = HOME / ".claude.json"
     data = _read_json(p)
     data.setdefault("mcpServers", {})[SERVER_NAME] = _server_entry()
@@ -363,60 +379,121 @@ def _uninstall_from_clients(report: list[str]) -> None:
 # Manifest fetch
 # ---------------------------------------------------------------------------
 
+def _public_config_variant(url: str) -> str | None:
+    """Return the `/PublicConfig` sibling of a `/Config` manifest URL.
+
+    The anonymous PublicConfig endpoint serves the same manifest without a
+    browser login (gated server-side by `MCPInstall:AllowPublic`). We only
+    rewrite the trailing `…/Config` path segment, preserving any query
+    string, and we never downgrade an URL that already targets PublicConfig.
+    """
+    split = urllib.parse.urlsplit(url)
+    path = split.path
+    if path.lower().endswith("/publicconfig"):
+        return None
+    if path.lower().endswith("/config"):
+        new_path = path[: -len("config")] + "PublicConfig"
+        return urllib.parse.urlunsplit(split._replace(path=new_path))
+    return None
+
+
+def _candidate_manifest_urls(src: str) -> list[str]:
+    """Ordered URLs to try, auto-correcting the two mistakes users hit most:
+
+      1. http:// when the server only serves https (a redirect we can follow
+         but which strips request bodies / confuses some proxies), and
+      2. pointing at the auth-gated /Config instead of the anonymous
+         /PublicConfig.
+
+    Order: try exactly what the user gave first, then progressively
+    corrected variants, so an already-correct URL incurs no extra requests.
+    """
+    schemes = [src]
+    if src.startswith("http://"):
+        schemes.append("https://" + src[len("http://"):])
+
+    out: list[str] = []
+    for u in schemes:
+        if u not in out:
+            out.append(u)
+        pub = _public_config_variant(u)
+        if pub and pub not in out:
+            out.append(pub)
+    return out
+
+
+def _try_fetch_manifest_url(client: httpx.Client, url: str) -> tuple[dict | None, str]:
+    """Fetch one candidate URL. Returns (manifest, "") on success or
+    (None, diagnostic) describing why this candidate didn't yield JSON."""
+    try:
+        r = client.get(url)
+    except httpx.RequestError as exc:
+        return None, f"GET {url} -> request error: {exc}"
+    if r.status_code >= 400:
+        return None, f"GET {url} -> HTTP {r.status_code}: {r.text[:120]}"
+    ctype = (r.headers.get("content-type") or "").lower()
+    final_url = str(r.url)
+    if "json" not in ctype:
+        body_preview = r.text[:120].strip()
+        return None, (
+            f"GET {url} -> non-JSON (content-type={ctype or 'unset'}, "
+            f"final URL={final_url}); body: {body_preview!r}"
+        )
+    try:
+        return r.json(), ""
+    except ValueError as exc:
+        return None, f"GET {url} -> 200 but invalid JSON: {exc}"
+
+
 def _fetch_manifest(src: str) -> dict:
     """Accepts a URL or a local file path. Returns the parsed JSON manifest.
 
-    On non-JSON responses we surface the specific deployment misconfiguration
-    (missing PathBase, hitting the auth-gated /Config instead of
-    /PublicConfig, wrong host, etc.) rather than dumping a JSONDecodeError.
+    For URLs we try the input plus auto-corrected variants (https upgrade,
+    /Config -> /PublicConfig) so the natural copy/pasted admin URL works
+    even when it points at the login-gated endpoint or uses http://. If
+    every candidate fails we surface the specific deployment
+    misconfiguration rather than dumping a JSONDecodeError.
     """
     if src.startswith(("http://", "https://")):
+        candidates = _candidate_manifest_urls(src)
+        diagnostics: list[str] = []
         with httpx.Client(timeout=30.0, verify=False, follow_redirects=True) as client:
-            r = client.get(src)
-        if r.status_code >= 400:
-            raise RuntimeError(f"GET {src} -> HTTP {r.status_code}: {r.text[:200]}")
-        ctype = (r.headers.get("content-type") or "").lower()
-        body_preview = r.text[:200].strip()
-        final_url = str(r.url)
-        if "json" not in ctype:
-            hints = []
-            looks_like_login = "datatrust login" in body_preview.lower() \
-                or "account/login" in final_url.lower() \
-                or "identity/account/login" in final_url.lower()
-            if looks_like_login:
-                hints.append(
-                    "Endpoint requires login. Use the public manifest instead — "
-                    "replace `/Config` with `/PublicConfig` in the URL."
-                )
-            if "/Rightdata" not in src and "/Rightdata" in final_url:
-                hints.append(
-                    "Server is hosted under a PathBase. Include it in your URL, e.g. "
-                    "`/Rightdata/api/MCPInstall/PublicConfig`."
-                )
-            if src.startswith("http://") and final_url.startswith("https://"):
-                hints.append(
-                    "Server redirected http:// to https://. Use the https:// URL directly."
-                )
-            if not hints:
-                hints.append(
-                    "Server returned non-JSON. Verify the URL points at "
-                    "`<base>/api/MCPInstall/PublicConfig` (or `/Config` only if you "
-                    "have a browser session) and that the deployment exposes the "
-                    "MCPInstall controller."
-                )
-            raise RuntimeError(
-                f"GET {src} returned non-JSON (content-type={ctype or 'unset'}, "
-                f"final URL={final_url}).\n"
-                + "\n".join(f"  • {h}" for h in hints)
-                + f"\nFirst 200 chars of body: {body_preview!r}"
+            for url in candidates:
+                manifest, diag = _try_fetch_manifest_url(client, url)
+                if manifest is not None:
+                    if url != src:
+                        print(f"  ↳ auto-corrected manifest URL to {url}")
+                    return manifest
+                diagnostics.append(diag)
+
+        hints = []
+        joined = " ".join(diagnostics).lower()
+        if "account/login" in joined or "datatrust login" in joined:
+            hints.append(
+                "The /Config endpoint requires a browser login and "
+                "/PublicConfig is disabled. Either enable "
+                "`MCPInstall:AllowPublic` on the server, or open /Config in a "
+                "browser, save the downloaded JSON, and run "
+                "`datatrust-mcp setup <file.json>`."
             )
-        try:
-            return r.json()
-        except ValueError as exc:
-            raise RuntimeError(
-                f"GET {src} returned 200 but the body wasn't valid JSON: {exc}.\n"
-                f"First 200 chars: {body_preview!r}"
-            ) from exc
+        if "/rightdata" not in src.lower() and "/rightdata" in joined:
+            hints.append(
+                "Server is hosted under a PathBase. Include it in your URL, e.g. "
+                "`/Rightdata/api/MCPInstall/PublicConfig`."
+            )
+        if not hints:
+            hints.append(
+                "Verify the URL points at `<base>/api/MCPInstall/PublicConfig` "
+                "(or `/Config` with a browser session) and that the deployment "
+                "exposes the MCPInstall controller."
+            )
+        raise RuntimeError(
+            f"Could not fetch a JSON manifest from {src} or its auto-corrected "
+            f"variants.\nTried:\n"
+            + "\n".join(f"  • {d}" for d in diagnostics)
+            + "\n\n"
+            + "\n".join(f"  → {h}" for h in hints)
+        )
     p = Path(src).expanduser()
     if not p.exists():
         raise FileNotFoundError(f"{src!r} is neither a URL nor an existing file")

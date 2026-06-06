@@ -12,6 +12,7 @@ import sys
 import httpx
 
 from datatrust_mcp import config as cfg
+from datatrust_mcp import oauth
 from datatrust_mcp.server import _call_upstream, _summarize
 
 
@@ -20,7 +21,7 @@ async def run(keyword: str, obj: str | None) -> int:
     env = reg.get(None)
     failures = 0
     res = {}
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, verify=oauth.verify_tls()) as client:
         print(f"[1/3] search_metadata(query={keyword!r}) on env={env.name}")
         try:
             res = await _call_upstream(client, env, "search_metadata", {"query": keyword, "limit": 5})

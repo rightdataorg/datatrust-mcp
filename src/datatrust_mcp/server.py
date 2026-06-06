@@ -560,7 +560,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 
     env, args = _resolve_env(arguments)
 
-    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, verify=oauth.verify_tls()) as client:
         if name in PASSTHROUGH:
             result = await _call_upstream(client, env, name, args)
             # Tag every response with the env it served so the LLM never has
