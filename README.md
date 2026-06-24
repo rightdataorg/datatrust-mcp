@@ -61,12 +61,14 @@ Invoking `datatrust-mcp` with no args starts the stdio MCP server (what AI clien
 |---|---|
 | `list_environments` | Show configured envs, default, sign-in status |
 | `switch_default_environment` | Persist a new default env |
-| `search_metadata` | Find data assets by keyword |
-| `get_quality_score` | Latest DQ score |
-| `get_failed_rules` | Recent failed rules |
-| `workspace_summary` | Dashboard totals |
-| `confirm_and_create_scenarios` | Deploy scenarios (requires scope) |
+| `search_assets` | Find data assets by keyword (foundation) |
+| `datatrust_get_quality_score` | Latest DQ score |
+| `datatrust_get_failed_rules` | Recent failed rules |
+| `get_workspace_summary` | Dashboard totals (foundation) |
+| `datatrust_confirm_and_create_scenarios` | Deploy scenarios (requires scope) |
 | … | See product docs for full catalog |
+
+Tools follow the `<product>_<verb>_<object>` convention: common foundation tools have no prefix (`search_assets`, `list_connections`, `get_workspace_summary`), DataTrust tools use the `datatrust_` prefix, and RightSight tools use the `rightsight_` prefix.
 
 Every tool accepts optional `environment` (e.g. `"prod"`). Omit to use the default.
 

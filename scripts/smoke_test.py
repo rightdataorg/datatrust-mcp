@@ -22,9 +22,9 @@ async def run(keyword: str, obj: str | None) -> int:
     failures = 0
     res = {}
     async with httpx.AsyncClient(timeout=30.0, verify=oauth.verify_tls()) as client:
-        print(f"[1/3] search_metadata(query={keyword!r}) on env={env.name}")
+        print(f"[1/3] search_assets(query={keyword!r}) on env={env.name}")
         try:
-            res = await _call_upstream(client, env, "search_metadata", {"query": keyword, "limit": 5})
+            res = await _call_upstream(client, env, "search_assets", {"query": keyword, "limit": 5})
             print(json.dumps(res, indent=2, default=str)[:800])
             print("    OK\n")
         except Exception as exc:
@@ -40,20 +40,20 @@ async def run(keyword: str, obj: str | None) -> int:
                 target = None
 
         if not target:
-            print("[2/3] get_quality_score: skipped (no object name and search returned nothing)")
-            print("[3/3] summarize_dq_for_object: skipped\n")
+            print("[2/3] datatrust_get_quality_score: skipped (no object name and search returned nothing)")
+            print("[3/3] datatrust_summarize_object_health: skipped\n")
             return failures
 
-        print(f"[2/3] get_quality_score(objectName={target!r})")
+        print(f"[2/3] datatrust_get_quality_score(objectName={target!r})")
         try:
-            res = await _call_upstream(client, env, "get_quality_score", {"objectName": target})
+            res = await _call_upstream(client, env, "datatrust_get_quality_score", {"objectName": target})
             print(json.dumps(res, indent=2, default=str)[:800])
             print("    OK\n")
         except Exception as exc:
             print(f"    FAILED: {exc}\n")
             failures += 1
 
-        print(f"[3/3] summarize_dq_for_object(objectName={target!r})")
+        print(f"[3/3] datatrust_summarize_object_health(objectName={target!r})")
         try:
             res = await _summarize(client, env, {"objectName": target, "drift_days": 30})
             print(json.dumps(res, indent=2, default=str)[:1200])

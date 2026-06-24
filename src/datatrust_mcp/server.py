@@ -246,18 +246,24 @@ async def _call_upstream(
 
 # Tools that just proxy to FastAPI. They all accept an optional `environment`.
 PASSTHROUGH = {
-    "search_metadata", "list_data_assets", "list_domains",
-    "get_quality_score", "get_failed_rules", "get_run_history",
-    "list_dq_jobs", "get_drift_events", "workspace_summary",
-    "propose_scenarios", "answer_clarifications", "list_pending_scenarios",
-    "confirm_and_create_scenarios", "list_connection_profiles",
+    # Foundation / common discovery + config read.
+    "search_assets", "list_data_assets", "list_connections",
+    "get_workspace_summary",
+    # DataTrust data-quality read.
+    "datatrust_get_quality_score", "datatrust_get_failed_rules",
+    "datatrust_get_run_history", "datatrust_list_dq_jobs",
+    # DataTrust scenario generation (FDR authoring).
+    "datatrust_propose_scenarios", "datatrust_answer_clarifications",
+    "datatrust_list_pending_scenarios", "datatrust_confirm_and_create_scenarios",
+    # RightSight observability read.
+    "rightsight_list_domains", "rightsight_get_drift_events",
     # .NET-native tools — implemented in the DataTrust gateway, not FastAPI.
     # The MCP client treats them like any other gateway passthrough.
-    "list_scenarios", "get_scenario", "run_scenario",
-    "get_scenario_run_status", "get_scenario_exceptions",
-    "list_query_chains", "get_query_chain", "run_query_chain",
-    "get_query_results",
-    "run_dq_job", "get_dq_job_status",
+    "datatrust_list_scenarios", "datatrust_get_scenario", "datatrust_run_scenario",
+    "datatrust_get_scenario_run_status", "datatrust_get_scenario_exceptions",
+    "datatrust_list_query_chains", "datatrust_get_query_chain",
+    "datatrust_run_query_chain", "datatrust_get_query_results",
+    "datatrust_run_dq_job", "datatrust_get_dq_job_status",
 }
 
 
@@ -303,8 +309,9 @@ TOOLS: list[Tool] = [
             "properties": {"environment": _env_arg()},
             "required": ["environment"],
         }),
-    Tool(name="search_metadata",
-        description="Search DataTrust for data assets by keyword. Matches against asset name and description.",
+    # ----- Foundation: discovery + config read -----------------------------
+    Tool(name="search_assets",
+        description="[foundation] Search DataTrust/RightSight for data assets by keyword. Matches against asset name and description.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -314,7 +321,7 @@ TOOLS: list[Tool] = [
             "required": ["query"],
         })),
     Tool(name="list_data_assets",
-        description="List data assets, optionally filtered by domain or criticality.",
+        description="[foundation] List data assets, optionally filtered by domain or criticality.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -324,39 +331,21 @@ TOOLS: list[Tool] = [
                 "limit": {"type": "number", "default": 10},
             },
         })),
-    Tool(name="list_domains",
-        description="List all business domains with asset counts.",
+    Tool(name="list_connections",
+        description="[foundation] List active connection profiles accessible to the user.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"limit": {"type": "number", "default": 50}},
+        })),
+    Tool(name="get_workspace_summary",
+        description="[foundation] At-a-glance overview of the DataTrust/RightSight workspace.",
         inputSchema=_augment_schema({"type": "object", "properties": {}})),
-    Tool(name="get_quality_score",
-        description="Latest data-quality score for any DQ job/session matching the query.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"objectName": {"type": "string"}},
-            "required": ["objectName"],
-        })),
-    Tool(name="get_failed_rules",
-        description="Recent rule executions that failed or errored.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 10}},
-        })),
-    Tool(name="get_run_history",
-        description="Recent DQ job-session executions.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "limit": {"type": "number", "default": 10},
-            },
-        })),
-    Tool(name="list_dq_jobs",
-        description="DataTrust DQ jobs with last-run status and schedule.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 10}},
-        })),
-    Tool(name="get_drift_events",
-        description="Recent metadata-drift events.",
+    # ----- RightSight: semantic layer + observability ----------------------
+    Tool(name="rightsight_list_domains",
+        description="[rightsight] List all business domains with asset counts.",
+        inputSchema=_augment_schema({"type": "object", "properties": {}})),
+    Tool(name="rightsight_get_drift_events",
+        description="[rightsight] Recent metadata schema-drift events.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -365,11 +354,38 @@ TOOLS: list[Tool] = [
                 "limit": {"type": "number", "default": 10},
             },
         })),
-    Tool(name="workspace_summary",
-        description="At-a-glance overview of the DataTrust workspace.",
-        inputSchema=_augment_schema({"type": "object", "properties": {}})),
-    Tool(name="propose_scenarios",
-        description="Auto-generate DataTrust reconciliation (FDR) scenarios from text or a file.",
+    # ----- DataTrust: data-quality read ------------------------------------
+    Tool(name="datatrust_get_quality_score",
+        description="[datatrust] Latest data-quality score for any DQ job/session matching the query.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"objectName": {"type": "string"}},
+            "required": ["objectName"],
+        })),
+    Tool(name="datatrust_get_failed_rules",
+        description="[datatrust] Recent rule executions that failed or errored.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"limit": {"type": "number", "default": 10}},
+        })),
+    Tool(name="datatrust_get_run_history",
+        description="[datatrust] Recent DQ job-session executions.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "limit": {"type": "number", "default": 10},
+            },
+        })),
+    Tool(name="datatrust_list_dq_jobs",
+        description="[datatrust] DataTrust DQ jobs with last-run status and schedule.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"limit": {"type": "number", "default": 10}},
+        })),
+    # ----- DataTrust: scenario generation (FDR authoring) ------------------
+    Tool(name="datatrust_propose_scenarios",
+        description="[datatrust] Auto-generate DataTrust reconciliation (FDR) scenarios from text or a file.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -377,8 +393,8 @@ TOOLS: list[Tool] = [
                 "filePath": {"type": "string"},
             },
         })),
-    Tool(name="answer_clarifications",
-        description="Continue a scenario-generation session by answering questions.",
+    Tool(name="datatrust_answer_clarifications",
+        description="[datatrust] Continue a scenario-generation session by answering questions.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -387,15 +403,15 @@ TOOLS: list[Tool] = [
             },
             "required": ["sessionId", "answers"],
         })),
-    Tool(name="list_pending_scenarios",
-        description="Show current draft scenarios for a generation session.",
+    Tool(name="datatrust_list_pending_scenarios",
+        description="[datatrust] Show current draft scenarios for a generation session.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {"sessionId": {"type": "string"}},
             "required": ["sessionId"],
         })),
-    Tool(name="confirm_and_create_scenarios",
-        description="Deploy generated scenarios. Only call after explicit user approval.",
+    Tool(name="datatrust_confirm_and_create_scenarios",
+        description="[datatrust] Deploy generated scenarios. Only call after explicit user approval.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -405,15 +421,9 @@ TOOLS: list[Tool] = [
                 "runInBackground": {"type": "boolean", "default": True},
             },
         })),
-    Tool(name="list_connection_profiles",
-        description="List active DataTrust connection profiles.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 50}},
-        })),
-    # ----- .NET-native: scenarios / FDR ------------------------------------
-    Tool(name="list_scenarios",
-        description="List DataTrust reconciliation (FDR/validation) scenarios. Optionally filter by name search or folder id.",
+    # ----- DataTrust .NET-native: scenarios / FDR --------------------------
+    Tool(name="datatrust_list_scenarios",
+        description="[datatrust] List DataTrust reconciliation (FDR/validation) scenarios. Optionally filter by name search or folder id.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -422,15 +432,15 @@ TOOLS: list[Tool] = [
                 "limit": {"type": "number", "default": 25},
             },
         })),
-    Tool(name="get_scenario",
-        description="Get the definition of one scenario by id (header, type, thresholds, owner, latest session).",
+    Tool(name="datatrust_get_scenario",
+        description="[datatrust] Get the definition of one scenario by id (header, type, thresholds, owner, latest session).",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {"scenarioId": {"type": "number"}},
             "required": ["scenarioId"],
         })),
-    Tool(name="run_scenario",
-        description="Execute a scenario now. Returns the new session status. Only call after explicit user approval.",
+    Tool(name="datatrust_run_scenario",
+        description="[datatrust] Execute a scenario now. Returns the new session status. Only call after explicit user approval.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -439,8 +449,8 @@ TOOLS: list[Tool] = [
             },
             "required": ["scenarioId"],
         })),
-    Tool(name="get_scenario_run_status",
-        description="Recent execution sessions for a scenario, with status code and message.",
+    Tool(name="datatrust_get_scenario_run_status",
+        description="[datatrust] Recent execution sessions for a scenario, with status code and message.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -449,8 +459,8 @@ TOOLS: list[Tool] = [
             },
             "required": ["scenarioId"],
         })),
-    Tool(name="get_scenario_exceptions",
-        description="Result/exception summary for a scenario's session(s) (status, message, pass/fail).",
+    Tool(name="datatrust_get_scenario_exceptions",
+        description="[datatrust] Result/exception summary for a scenario's session(s) (status, message, pass/fail).",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -459,9 +469,9 @@ TOOLS: list[Tool] = [
             },
             "required": ["scenarioId"],
         })),
-    # ----- .NET-native: query chains ---------------------------------------
-    Tool(name="list_query_chains",
-        description="List query chains in the DataTrust query builder. Optionally filter by name search.",
+    # ----- DataTrust .NET-native: query chains -----------------------------
+    Tool(name="datatrust_list_query_chains",
+        description="[datatrust] List query chains in the DataTrust query builder. Optionally filter by name search.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -469,15 +479,15 @@ TOOLS: list[Tool] = [
                 "limit": {"type": "number", "default": 25},
             },
         })),
-    Tool(name="get_query_chain",
-        description="Get one query / query chain by id (name, profile, SQL text, type).",
+    Tool(name="datatrust_get_query_chain",
+        description="[datatrust] Get one query / query chain by id (name, profile, SQL text, type).",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {"queryId": {"type": "number"}},
             "required": ["queryId"],
         })),
-    Tool(name="run_query_chain",
-        description="Execute a query chain now. Returns the run status. Only call after explicit user approval.",
+    Tool(name="datatrust_run_query_chain",
+        description="[datatrust] Execute a query chain now. Returns the run status. Only call after explicit user approval.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -486,8 +496,8 @@ TOOLS: list[Tool] = [
             },
             "required": ["queryId"],
         })),
-    Tool(name="get_query_results",
-        description="Recent execution sessions / results for a query or query chain.",
+    Tool(name="datatrust_get_query_results",
+        description="[datatrust] Recent execution sessions / results for a query or query chain.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -496,9 +506,9 @@ TOOLS: list[Tool] = [
             },
             "required": ["queryId"],
         })),
-    # ----- .NET-native: data quality execution -----------------------------
-    Tool(name="run_dq_job",
-        description="Trigger a Data Quality job (submitted to the execution engine). Only call after explicit user approval.",
+    # ----- DataTrust .NET-native: data quality execution -------------------
+    Tool(name="datatrust_run_dq_job",
+        description="[datatrust] Trigger a Data Quality job (submitted to the execution engine). Only call after explicit user approval.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -507,8 +517,8 @@ TOOLS: list[Tool] = [
             },
             "required": ["jobId"],
         })),
-    Tool(name="get_dq_job_status",
-        description="Status / latest run result of a Data Quality job. Pass runId for a specific run, else returns the summary.",
+    Tool(name="datatrust_get_dq_job_status",
+        description="[datatrust] Status / latest run result of a Data Quality job. Pass runId for a specific run, else returns the summary.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -517,8 +527,8 @@ TOOLS: list[Tool] = [
             },
             "required": ["jobId"],
         })),
-    Tool(name="summarize_dq_for_object",
-        description="Composite health report: score + failing rules + drift.",
+    Tool(name="datatrust_summarize_object_health",
+        description="[datatrust] Composite health report: score + failing rules + drift.",
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -569,7 +579,7 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
                 result.setdefault("environment", env.name)
             return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-        if name == "summarize_dq_for_object":
+        if name == "datatrust_summarize_object_health":
             result = await _summarize(client, env, args)
             return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
@@ -579,13 +589,13 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
 async def _summarize(client: httpx.AsyncClient, env: cfg.Environment, args: dict[str, Any]) -> dict[str, Any]:
     object_name = args.get("objectName") or args.get("name")
     if not object_name:
-        raise ValueError("summarize_dq_for_object requires objectName")
+        raise ValueError("datatrust_summarize_object_health requires objectName")
     drift_days = int(args.get("drift_days", 30))
 
-    score_task = _call_upstream(client, env, "get_quality_score", {"objectName": object_name})
-    failed_task = _call_upstream(client, env, "get_failed_rules", {"limit": 10})
+    score_task = _call_upstream(client, env, "datatrust_get_quality_score", {"objectName": object_name})
+    failed_task = _call_upstream(client, env, "datatrust_get_failed_rules", {"limit": 10})
     drift_task = _call_upstream(
-        client, env, "get_drift_events",
+        client, env, "rightsight_get_drift_events",
         {"profileName": object_name, "days": drift_days, "limit": 10},
     )
     score, failed, drift = await asyncio.gather(
