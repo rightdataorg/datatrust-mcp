@@ -32,7 +32,7 @@ from dotenv import load_dotenv
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
-from mcp.types import TextContent, Tool
+from mcp.types import TextContent, Tool, ToolAnnotations
 
 from . import config as cfg
 from . import oauth
@@ -385,7 +385,13 @@ TOOLS: list[Tool] = [
         })),
     # ----- DataTrust: scenario generation (FDR authoring) ------------------
     Tool(name="datatrust_propose_scenarios",
-        description="[datatrust] Auto-generate DataTrust reconciliation (FDR) scenarios from text or a file.",
+        description=(
+            "[datatrust] Auto-generate DataTrust reconciliation (FDR) scenarios from text or a file. "
+            "Connection profiles are never invented — when source/target connection, compare/primary "
+            "keys, decode mappings or type-casts are missing or ambiguous it returns typed "
+            "clarification questions instead of deployable scenarios. Answer them with "
+            "datatrust_answer_clarifications before attempting to create."
+        ),
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
@@ -411,12 +417,31 @@ TOOLS: list[Tool] = [
             "required": ["sessionId"],
         })),
     Tool(name="datatrust_confirm_and_create_scenarios",
-        description="[datatrust] Deploy generated scenarios. Only call after explicit user approval.",
+        description=(
+            "[datatrust] Deploy generated reconciliation scenarios. DESTRUCTIVE and "
+            "NOT idempotent in intent — it creates persistent scenarios in DataTrust. "
+            "A server-side hard gate blocks creation unless every scenario is fully "
+            "validated: each source/target connection profile must EXIST, be ENABLED "
+            "and have a passing last connection test; every generated SQL must parse "
+            "against its connection; and required inputs (connections, compare/primary "
+            "keys) must be answered. If the gate is not green the call creates NOTHING "
+            "and returns a structured status (validation_required | connection_unresolved "
+            "| sql_invalid | needs_clarification) — resolve those first, do not retry "
+            "blindly. Pass EITHER sessionId OR an explicit scenarios array, never both. "
+            "Only call after explicit user approval."
+        ),
+        annotations=ToolAnnotations(
+            title="Create DataTrust scenarios",
+            destructiveHint=True,
+            idempotentHint=False,
+            readOnlyHint=False,
+            openWorldHint=True,
+        ),
         inputSchema=_augment_schema({
             "type": "object",
             "properties": {
-                "sessionId": {"type": "string"},
-                "scenarios": {"type": "array", "items": {"type": "object"}},
+                "sessionId": {"type": "string", "description": "Generation session id from propose_scenarios. Mutually exclusive with 'scenarios'."},
+                "scenarios": {"type": "array", "items": {"type": "object"}, "description": "Explicit scenarios to create. Mutually exclusive with 'sessionId'."},
                 "folderId": {"type": "number"},
                 "runInBackground": {"type": "boolean", "default": True},
             },
