@@ -263,7 +263,12 @@ PASSTHROUGH = {
     "datatrust_get_scenario_run_status", "datatrust_get_scenario_exceptions",
     "datatrust_list_query_chains", "datatrust_get_query_chain",
     "datatrust_run_query_chain", "datatrust_get_query_results",
+    "datatrust_get_source_columns", "datatrust_create_query_chain",
     "datatrust_run_dq_job", "datatrust_get_dq_job_status",
+    # .NET-native: ETL Test Case Harvester (proxied to Python agentic pipeline)
+    "datatrust_harvest_upload_document", "datatrust_harvest_extract",
+    "datatrust_harvest_submit_clarifications", "datatrust_harvest_get_job",
+    "datatrust_harvest_get_job_logs",
 }
 
 
@@ -530,6 +535,139 @@ TOOLS: list[Tool] = [
                 "limit": {"type": "number", "default": 10},
             },
             "required": ["queryId"],
+        })),
+    Tool(name="datatrust_get_source_columns",
+        description="[datatrust] Introspect columns of a source table/view on a connection profile. Use when building a query chain spec.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "connectionProfile": {"type": "string", "description": "Connection profile name (alternative to profileId)."},
+                "profileId": {"type": "number", "description": "Connection profile id (alternative to connectionProfile)."},
+                "tableName": {"type": "string", "description": "Table or view name (catalog.schema.table as required by the source)."},
+                "databaseName": {"type": "string", "description": "Optional database/catalog name."},
+            },
+            "required": ["tableName"],
+        })),
+    Tool(name="datatrust_create_query_chain",
+        description="[datatrust] Create a runnable query chain from a structured spec: source -> optional projection/filter -> RD Output. Deterministic (no LLM). Only call after explicit user approval.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Unique name for the query chain."},
+                "description": {"type": "string", "description": "Optional description."},
+                "folderId": {"type": "number", "description": "Target folder id; 0 uses the user's default folder.", "default": 0},
+                "source": {
+                    "type": "object",
+                    "description": "Source definition.",
+                    "properties": {
+                        "connectionProfile": {"type": "string"},
+                        "profileId": {"type": "number"},
+                        "objectType": {"type": "string", "description": "TableOrViewName | SQL_Text | ExistingQuery."},
+                        "objectName": {"type": "string"},
+                        "columns": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "dataType": {"type": "string"},
+                                    "isPrimaryKey": {"type": "boolean"},
+                                },
+                            },
+                        },
+                    },
+                },
+                "projection": {
+                    "type": "object",
+                    "properties": {
+                        "columns": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+                "filter": {
+                    "type": "object",
+                    "properties": {
+                        "expression": {"type": "string", "description": "Filter expression, e.g. amount > 0."},
+                    },
+                },
+                "output": {
+                    "type": "object",
+                    "description": "RD Output (terminal) configuration.",
+                    "properties": {
+                        "metaName": {"type": "string", "description": "Output/snapshot name (required)."},
+                        "outputViewName": {"type": "string", "description": "Optional output view name."},
+                    },
+                    "required": ["metaName"],
+                },
+            },
+            "required": ["name", "source", "output"],
+        })),
+    # ----- DataTrust .NET-native: ETL Test Case Harvester ------------------
+    Tool(name="datatrust_harvest_upload_document",
+        description="[datatrust] Upload an ETL design document (base64) to the DataTrust server for the harvester. Returns a document descriptor for datatrust_harvest_extract.documents[].",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "file_name": {"type": "string", "description": "Original file name incl. extension (xlsx, docx, pdf, pptx, txt, csv)."},
+                "content_base64": {"type": "string", "description": "Base64-encoded file content. A data: URI prefix is also accepted."},
+                "file_type": {"type": "string", "description": "Optional role hint: functional_spec, design_flow, technical_spec, mapping_document, other."},
+                "instructions": {"type": "string", "description": "Optional per-document instructions for the agent."},
+            },
+            "required": ["file_name", "content_base64"],
+        })),
+    Tool(name="datatrust_harvest_extract",
+        description="[datatrust] Start an ETL Test Case Harvester job from ETL design documents. Returns a job id; poll datatrust_harvest_get_job. Long-running — only call after explicit user approval.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "job_name": {"type": "string"},
+                "description": {"type": "string"},
+                "harvest_job_id": {"type": "string", "description": "Optional Supabase harvest job id for DB sync."},
+                "documents": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_name": {"type": "string"},
+                            "file_url": {"type": "string"},
+                            "file_type": {"type": "string"},
+                            "instructions": {"type": "string"},
+                        },
+                    },
+                },
+                "reconciliation_types": {"type": "array", "items": {"type": "string"}},
+                "job_instructions": {"type": "string"},
+                "source_database": {"type": "string"},
+                "target_database": {"type": "string"},
+                "source_connection_profile": {"type": "string"},
+                "target_connection_profile": {"type": "string"},
+                "do_comparison_on_source": {"type": "boolean"},
+                "limit_exceptions": {"type": "string"},
+            },
+            "required": ["job_name", "documents"],
+        })),
+    Tool(name="datatrust_harvest_submit_clarifications",
+        description="[datatrust] Resume a harvest job waiting for clarification. Provide answers keyed by question id.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {
+                "job_id": {"type": "string"},
+                "clarificationAnswers": {"type": "object", "additionalProperties": {"type": "string"}},
+            },
+            "required": ["job_id", "clarificationAnswers"],
+        })),
+    Tool(name="datatrust_harvest_get_job",
+        description="[datatrust] Get status, progress, and generated scenarios (result_data) of a harvest job by id.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"jobId": {"type": "string"}},
+            "required": ["jobId"],
+        })),
+    Tool(name="datatrust_harvest_get_job_logs",
+        description="[datatrust] Get the structured log stream for a harvest job by id.",
+        inputSchema=_augment_schema({
+            "type": "object",
+            "properties": {"jobId": {"type": "string"}},
+            "required": ["jobId"],
         })),
     # ----- DataTrust .NET-native: data quality execution -------------------
     Tool(name="datatrust_run_dq_job",

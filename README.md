@@ -70,6 +70,8 @@ Invoking `datatrust-mcp` with no args starts the stdio MCP server (what AI clien
 
 Tools follow the `<product>_<verb>_<object>` convention: common foundation tools have no prefix (`search_assets`, `list_connections`, `get_workspace_summary`), DataTrust tools use the `datatrust_` prefix, and RightSight tools use the `rightsight_` prefix.
 
+The stdio client exposes **35 tools** — the same names as the DataTrust gateway merged catalog (14 Python + 18 .NET-native) plus `list_environments`, `switch_default_environment`, and the client-local composite `datatrust_summarize_object_health`. Run `python scripts/verify_tool_catalog.py` after adding tools to confirm parity with the gateway.
+
 Every tool accepts optional `environment` (e.g. `"prod"`). Omit to use the default.
 
 ## Security model
