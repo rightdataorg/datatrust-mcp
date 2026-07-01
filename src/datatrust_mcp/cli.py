@@ -398,15 +398,11 @@ def _public_config_variant(url: str) -> str | None:
 
 
 def _candidate_manifest_urls(src: str) -> list[str]:
-    """Ordered URLs to try, auto-correcting the two mistakes users hit most:
+    """Ordered URLs to try, auto-correcting common setup mistakes:
 
-      1. http:// when the server only serves https (a redirect we can follow
-         but which strips request bodies / confuses some proxies), and
-      2. pointing at the auth-gated /Config instead of the anonymous
-         /PublicConfig.
-
-    Order: try exactly what the user gave first, then progressively
-    corrected variants, so an already-correct URL incurs no extra requests.
+      1. MVC PathBase in the URL (/Rightdata/api/... → /api/... on host root)
+      2. http:// when the server only serves https
+      3. auth-gated /Config instead of anonymous /PublicConfig
     """
     schemes = [src]
     if src.startswith("http://"):
@@ -416,9 +412,15 @@ def _candidate_manifest_urls(src: str) -> list[str]:
     for u in schemes:
         if u not in out:
             out.append(u)
+        normalized = cfg.normalize_mcp_api_url(u)
+        if normalized and normalized not in out:
+            out.append(normalized)
         pub = _public_config_variant(u)
         if pub and pub not in out:
             out.append(pub)
+        pub_norm = _public_config_variant(normalized) if normalized else None
+        if pub_norm and pub_norm not in out:
+            out.append(pub_norm)
     return out
 
 
@@ -429,6 +431,9 @@ def _try_fetch_manifest_url(client: httpx.Client, url: str) -> tuple[dict | None
         r = client.get(url)
     except httpx.RequestError as exc:
         return None, f"GET {url} -> request error: {exc}"
+    if 300 <= r.status_code < 400:
+        loc = r.headers.get("location", "<no Location>")
+        return None, f"GET {url} -> HTTP {r.status_code} redirect to {loc}"
     if r.status_code >= 400:
         return None, f"GET {url} -> HTTP {r.status_code}: {r.text[:120]}"
     ctype = (r.headers.get("content-type") or "").lower()
@@ -457,7 +462,7 @@ def _fetch_manifest(src: str) -> dict:
     if src.startswith(("http://", "https://")):
         candidates = _candidate_manifest_urls(src)
         diagnostics: list[str] = []
-        with httpx.Client(timeout=30.0, verify=False, follow_redirects=True) as client:
+        with httpx.Client(timeout=30.0, verify=False, follow_redirects=False) as client:
             for url in candidates:
                 manifest, diag = _try_fetch_manifest_url(client, url)
                 if manifest is not None:
@@ -468,18 +473,21 @@ def _fetch_manifest(src: str) -> dict:
 
         hints = []
         joined = " ".join(diagnostics).lower()
-        if "account/login" in joined or "datatrust login" in joined:
+        if "account/login" in joined or "datatrust login" in joined or "302" in joined:
             hints.append(
-                "The /Config endpoint requires a browser login and "
-                "/PublicConfig is disabled. Either enable "
-                "`MCPInstall:AllowPublic` on the server, or open /Config in a "
-                "browser, save the downloaded JSON, and run "
-                "`datatrust-mcp setup <file.json>`."
+                "The request was redirected to the DataTrust login page. MCP install "
+                "URLs must target /api/MCPInstall/PublicConfig on the host root "
+                "(no /Rightdata prefix). Try:\n"
+                "    datatrust-mcp setup https://dtcorelinux.getrightdata.com/api/MCPInstall/PublicConfig\n"
+                "If that returns 403, enable MCPInstall:AllowPublic on the server, "
+                "or open /api/MCPInstall/Config in a browser while logged in, save "
+                "the JSON, and run `datatrust-mcp setup <file.json>`."
             )
-        if "/rightdata" not in src.lower() and "/rightdata" in joined:
+        if "/rightdata" in src.lower():
             hints.append(
-                "Server is hosted under a PathBase. Include it in your URL, e.g. "
-                "`/Rightdata/api/MCPInstall/PublicConfig`."
+                "Do not include /Rightdata in MCP API URLs — that prefix is for "
+                "the web UI only. The CLI auto-tries the host-root variant; upgrade "
+                "datatrust-mcp if you do not see an auto-correct line."
             )
         if not hints:
             hints.append(

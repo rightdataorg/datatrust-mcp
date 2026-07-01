@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -78,6 +79,32 @@ def normalize_dotnet_api_url(url: str, *, path_base: str | None = None) -> str:
         if url.lower().endswith(key):
             return url[: -len(suffix)].rstrip("/")
     return url
+
+
+def normalize_mcp_api_url(url: str) -> str:
+    """Normalize a full MCP API URL (may include path + query).
+
+    Strips the MVC virtual directory from both the origin suffix and the
+    path prefix so setup/manifest calls hit /api/* on the host root.
+
+    Example:
+        https://host/Rightdata/api/MCPInstall/PublicConfig
+        -> https://host/api/MCPInstall/PublicConfig
+    """
+    split = urllib.parse.urlsplit((url or "").strip())
+    if not split.scheme or not split.netloc:
+        return (url or "").strip()
+
+    path = split.path or "/"
+    for seg in ("Rightdata", "rightdata"):
+        prefix = f"/{seg}/"
+        if path.startswith(prefix) or path.lower().startswith(prefix.lower()):
+            path = "/" + path[len(prefix):]
+            break
+
+    origin = normalize_dotnet_api_url(f"{split.scheme}://{split.netloc}")
+    host = urllib.parse.urlsplit(origin).netloc or split.netloc
+    return urllib.parse.urlunsplit((split.scheme, host, path, split.query, split.fragment))
 
 
 @dataclass(frozen=True)
