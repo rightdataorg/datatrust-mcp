@@ -294,10 +294,12 @@ def _interpret_init_response(resp: "httpx.Response", url: str) -> dict:
         location = resp.headers.get("location", "<no Location header>")
         raise GatewayNotDeployedError(
             f"POST {url} returned HTTP {resp.status_code} → {location}\n"
-            f"This means the DataTrust host doesn't have the MCP auth "
-            f"controllers in its current build. Ask whoever runs the host "
-            f"to deploy a DataTrust build that includes MCPAuthController "
-            f"(commit a7477cd03 or newer on develop_dt_rs)."
+            f"This usually means the URL included the MVC PathBase (e.g. /Rightdata) "
+            f"but MCP API routes live at /api/* on the host root. The datatrust-mcp "
+            f"client should strip PathBase automatically — re-run setup or check "
+            f"~/.config/datatrust-mcp/environments.json. If the URL is already correct, "
+            f"deploy a DataTrust build that includes MCPAuthController + the "
+            f"McpApiPathRewrite middleware."
         )
     if resp.status_code >= 400:
         raise RuntimeError(

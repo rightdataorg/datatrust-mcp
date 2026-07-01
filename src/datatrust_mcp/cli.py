@@ -511,7 +511,7 @@ def _validate_manifest(m: dict) -> dict:
     for name, body in envs.items():
         if not isinstance(name, str) or not isinstance(body, dict):
             continue
-        dnet = (body.get("dotnet_url") or "").strip().rstrip("/")
+        dnet = cfg.normalize_dotnet_api_url((body.get("dotnet_url") or "").strip().rstrip("/"))
         if not dnet:
             continue
         # v1.2+ manifests no longer expose fastapi_url to end users. The

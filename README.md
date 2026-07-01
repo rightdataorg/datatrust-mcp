@@ -134,7 +134,8 @@ Configure once per deployment in DataTrust `appsettings.json` under `MCPInstall`
 | Symptom | Fix |
 |---|---|
 | `No DataTrust MCP configuration found` | Run `datatrust-mcp setup <url>` |
-| Browser opens wrong URL / 404 on approve | Ensure manifest `dotnet_url` includes PathBase (e.g. `/Rightdata`) |
+| Device/Init 302 → `/Identity/Account/Login` | `dotnet_url` must be the **host root** (no `/Rightdata`). Re-run `datatrust-mcp setup` or edit `~/.config/datatrust-mcp/environments.json`. The client auto-strips PathBase; the server also rewrites `/Rightdata/api/*` → `/api/*`. |
+| Browser opens wrong URL / 404 on approve | Device verification URL is `{host}/api/MCPAuth/Device` (not under `/Rightdata`). Set `MCPInstall:PublicBaseUrl` to the host origin if behind a TLS proxy. |
 | `Could not locate datatrust-mcp executable` | Re-run `pip install git+https://github.com/rightdataorg/datatrust-mcp.git` |
 | Wrong user after laptop handoff | Run `datatrust-mcp logout` then sign in again |
 | Claude shows server but no tools | Restart the AI client |

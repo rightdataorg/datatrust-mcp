@@ -42,6 +42,43 @@ ENV_CONFIG_PATH = CONFIG_DIR / "environments.json"
 TOKENS_DIR = CONFIG_DIR / "tokens"
 STATE_PATH = CONFIG_DIR / "state.json"   # remembers the user's chosen default-override
 
+# MVC virtual-directory suffixes that must NOT be appended to MCP/API calls.
+# DataTrust attribute-routed controllers (MCPAuth, MCP gateway, MCPInstall) live
+# at /api/* on the host root even when the UI is served under /Rightdata.
+_DEFAULT_PATH_BASE_SUFFIXES = ("/Rightdata", "/rightdata")
+
+
+def normalize_dotnet_api_url(url: str, *, path_base: str | None = None) -> str:
+    """Return the host-root origin for MCP/API calls (strip MVC PathBase).
+
+    Example:
+        https://dtcorelinux.getrightdata.com/Rightdata
+        -> https://dtcorelinux.getrightdata.com
+    """
+    url = (url or "").strip().rstrip("/")
+    if not url:
+        return url
+
+    suffixes: list[str] = []
+    if path_base:
+        pb = path_base.strip().strip("/")
+        if pb:
+            suffixes.append(f"/{pb}")
+    env_pb = (os.environ.get("DATATRUST_PATH_BASE") or "").strip().strip("/")
+    if env_pb:
+        suffixes.append(f"/{env_pb}")
+    suffixes.extend(_DEFAULT_PATH_BASE_SUFFIXES)
+
+    seen: set[str] = set()
+    for suffix in suffixes:
+        key = suffix.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if url.lower().endswith(key):
+            return url[: -len(suffix)].rstrip("/")
+    return url
+
 
 @dataclass(frozen=True)
 class Environment:
@@ -110,12 +147,12 @@ def _from_legacy_env_vars() -> Registry | None:
     Only DATATRUST_DOTNET_URL is required in the new architecture; the
     stdio MCP no longer needs to know FastAPI's URL.
     """
-    dotnet = os.environ.get("DATATRUST_DOTNET_URL")
+    dotnet = normalize_dotnet_api_url(dotnet)
     if not dotnet:
         return None
     fastapi = (os.environ.get("DATATRUST_FASTAPI_URL") or "").rstrip("/")
     env = Environment(name="default", label="default",
-                      fastapi_url=fastapi, dotnet_url=dotnet.rstrip("/"))
+                      fastapi_url=fastapi, dotnet_url=dotnet)
     return Registry(customer=None, default="default",
                     environments={"default": env}, source="fallback-env-vars")
 
@@ -131,7 +168,7 @@ def load_registry() -> Registry:
         for name, body in (raw.get("environments") or {}).items():
             if not isinstance(body, dict):
                 continue
-            dnet = (body.get("dotnet_url") or "").rstrip("/")
+            dnet = normalize_dotnet_api_url((body.get("dotnet_url") or "").rstrip("/"))
             if not dnet:
                 continue  # dotnet_url is the only required field now
             # fastapi_url is optional in v1.1+ manifests since the
