@@ -36,6 +36,7 @@ from mcp.types import TextContent, Tool, ToolAnnotations
 
 from . import config as cfg
 from . import oauth
+from ._gateway_tools_snapshot import GATEWAY_TOOLS_SNAPSHOT
 
 load_dotenv()
 
@@ -243,33 +244,46 @@ async def _call_upstream(
 # ---------------------------------------------------------------------------
 # Tool catalog
 # ---------------------------------------------------------------------------
+#
+# Naming decision (Phase 1):
+#   Prefer gateway-canonical names from GET /api/mcp/v1/tools/list
+#   (e.g. list_scenarios, run_dq_job) over the older client-side
+#   datatrust_* prefixes for .NET-native tools. Python/FastAPI tools that
+#   the gateway already exposes as datatrust_* / rightsight_* keep those
+#   names unchanged. Client-local meta tools stay hard-coded below.
+#
+# Optional TOOL_NAME_ALIASES maps legacy MCP client names to gateway
+# canonical names so older prompts/callers keep working.
 
-# Tools that just proxy to FastAPI. They all accept an optional `environment`.
-PASSTHROUGH = {
-    # Foundation / common discovery + config read.
-    "search_assets", "list_data_assets", "list_connections",
-    "get_workspace_summary",
-    # DataTrust data-quality read.
-    "datatrust_get_quality_score", "datatrust_get_failed_rules",
-    "datatrust_get_run_history", "datatrust_list_dq_jobs",
-    # DataTrust scenario generation (FDR authoring).
-    "datatrust_propose_scenarios", "datatrust_answer_clarifications",
-    "datatrust_list_pending_scenarios", "datatrust_confirm_and_create_scenarios",
-    # RightSight observability read.
-    "rightsight_list_domains", "rightsight_get_drift_events",
-    # .NET-native tools — implemented in the DataTrust gateway, not FastAPI.
-    # The MCP client treats them like any other gateway passthrough.
-    "datatrust_list_scenarios", "datatrust_get_scenario", "datatrust_run_scenario",
-    "datatrust_get_scenario_run_status", "datatrust_get_scenario_exceptions",
-    "datatrust_list_query_chains", "datatrust_get_query_chain",
-    "datatrust_run_query_chain", "datatrust_get_query_results",
-    "datatrust_get_source_columns", "datatrust_create_query_chain",
-    "datatrust_run_dq_job", "datatrust_get_dq_job_status",
-    # .NET-native: ETL Test Case Harvester (proxied to Python agentic pipeline)
-    "datatrust_harvest_upload_document", "datatrust_harvest_extract",
-    "datatrust_harvest_submit_clarifications", "datatrust_harvest_get_job",
-    "datatrust_harvest_get_job_logs",
+# Always handled in this process — never forwarded to the gateway.
+CLIENT_LOCAL_TOOL_NAMES = frozenset({
+    "list_environments",
+    "switch_default_environment",
+    "datatrust_summarize_object_health",
+})
+
+# Legacy client names → gateway-canonical names (call_tool resolution only).
+# list_tools advertises gateway-canonical names; aliases are not duplicated
+# in the catalog unless a caller still invokes the old name.
+TOOL_NAME_ALIASES: dict[str, str] = {
+    "datatrust_list_scenarios": "list_scenarios",
+    "datatrust_get_scenario": "get_scenario",
+    "datatrust_run_scenario": "run_scenario",
+    "datatrust_get_scenario_run_status": "get_scenario_run_status",
+    "datatrust_get_scenario_exceptions": "get_scenario_exceptions",
+    "datatrust_list_query_chains": "list_query_chains",
+    "datatrust_get_query_chain": "get_query_chain",
+    "datatrust_run_query_chain": "run_query_chain",
+    "datatrust_get_query_results": "get_query_results",
+    "datatrust_run_dq_job": "run_dq_job",
+    "datatrust_get_dq_job_status": "get_dq_job_status",
 }
+
+_CATALOG_TTL_SEC = float(os.environ.get("DATATRUST_MCP_CATALOG_TTL", "300"))
+_catalog_lock = asyncio.Lock()
+# env_name -> (monotonic_deadline, tools_from_gateway)
+_catalog_cache: dict[str, tuple[float, list[Tool]]] = {}
+_last_good_catalog: list[Tool] | None = None
 
 
 def _env_arg() -> dict:
@@ -285,15 +299,47 @@ def _env_arg() -> dict:
 
 
 def _augment_schema(schema: dict) -> dict:
-    schema = dict(schema)
+    schema = dict(schema or {})
     props = dict(schema.get("properties") or {})
     props["environment"] = _env_arg()
     schema["properties"] = props
+    if "type" not in schema:
+        schema["type"] = "object"
     return schema
 
 
-TOOLS: list[Tool] = [
-    Tool(name="list_environments",
+def _tool_from_gateway_dict(entry: dict[str, Any]) -> Tool:
+    """Build an MCP Tool from a gateway tools/list entry (or snapshot row)."""
+    name = entry["name"]
+    description = entry.get("description") or name
+    schema = _augment_schema(entry.get("inputSchema") or {"type": "object", "properties": {}})
+    annotations = None
+    raw_ann = entry.get("annotations")
+    if isinstance(raw_ann, dict) and raw_ann:
+        try:
+            annotations = ToolAnnotations(**{
+                k: raw_ann[k]
+                for k in (
+                    "title", "destructiveHint", "idempotentHint",
+                    "readOnlyHint", "openWorldHint",
+                )
+                if k in raw_ann
+            })
+        except Exception:
+            annotations = None
+    if annotations is not None:
+        return Tool(name=name, description=description, inputSchema=schema, annotations=annotations)
+    return Tool(name=name, description=description, inputSchema=schema)
+
+
+def _static_gateway_tools() -> list[Tool]:
+    """Offline / last-resort snapshot of gateway-canonical tools."""
+    return [_tool_from_gateway_dict(row) for row in GATEWAY_TOOLS_SNAPSHOT]
+
+
+CLIENT_LOCAL_TOOLS: list[Tool] = [
+    Tool(
+        name="list_environments",
         description=(
             "Show the DataTrust environments this MCP can reach (e.g. dev, qa, "
             "prod, demo). Also reports which env is the current default and "
@@ -301,8 +347,10 @@ TOOLS: list[Tool] = [
             "Use this first whenever the user asks about environments or you "
             "are unsure which env to target."
         ),
-        inputSchema={"type": "object", "properties": {}}),
-    Tool(name="switch_default_environment",
+        inputSchema={"type": "object", "properties": {}},
+    ),
+    Tool(
+        name="switch_default_environment",
         description=(
             "Change the default DataTrust environment for tool calls that "
             "don't pass an explicit `environment` argument. Persisted to disk "
@@ -313,384 +361,10 @@ TOOLS: list[Tool] = [
             "type": "object",
             "properties": {"environment": _env_arg()},
             "required": ["environment"],
-        }),
-    # ----- Foundation: discovery + config read -----------------------------
-    Tool(name="search_assets",
-        description="[foundation] Search DataTrust/RightSight for data assets by keyword. Matches against asset name and description.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "number", "default": 10},
-            },
-            "required": ["query"],
-        })),
-    Tool(name="list_data_assets",
-        description="[foundation] List data assets, optionally filtered by domain or criticality.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "domain": {"type": "string"},
-                "criticality": {"type": "string"},
-                "limit": {"type": "number", "default": 10},
-            },
-        })),
-    Tool(name="list_connections",
-        description="[foundation] List active connection profiles accessible to the user.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 50}},
-        })),
-    Tool(name="get_workspace_summary",
-        description="[foundation] At-a-glance overview of the DataTrust/RightSight workspace.",
-        inputSchema=_augment_schema({"type": "object", "properties": {}})),
-    # ----- RightSight: semantic layer + observability ----------------------
-    Tool(name="rightsight_list_domains",
-        description="[rightsight] List all business domains with asset counts.",
-        inputSchema=_augment_schema({"type": "object", "properties": {}})),
-    Tool(name="rightsight_get_drift_events",
-        description="[rightsight] Recent metadata schema-drift events.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "days": {"type": "number", "default": 30},
-                "profileName": {"type": "string"},
-                "limit": {"type": "number", "default": 10},
-            },
-        })),
-    # ----- DataTrust: data-quality read ------------------------------------
-    Tool(name="datatrust_get_quality_score",
-        description="[datatrust] Latest data-quality score for any DQ job/session matching the query.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"objectName": {"type": "string"}},
-            "required": ["objectName"],
-        })),
-    Tool(name="datatrust_get_failed_rules",
-        description="[datatrust] Recent rule executions that failed or errored.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 10}},
-        })),
-    Tool(name="datatrust_get_run_history",
-        description="[datatrust] Recent DQ job-session executions.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string"},
-                "limit": {"type": "number", "default": 10},
-            },
-        })),
-    Tool(name="datatrust_list_dq_jobs",
-        description="[datatrust] DataTrust DQ jobs with last-run status and schedule.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"limit": {"type": "number", "default": 10}},
-        })),
-    # ----- DataTrust: scenario generation (FDR authoring) ------------------
-    Tool(name="datatrust_propose_scenarios",
-        description=(
-            "[datatrust] Auto-generate DataTrust reconciliation (FDR) scenarios from text or a file. "
-            "Connection profiles are never invented — when source/target connection, compare/primary "
-            "keys, decode mappings or type-casts are missing or ambiguous it returns typed "
-            "clarification questions instead of deployable scenarios. Answer them with "
-            "datatrust_answer_clarifications before attempting to create."
-        ),
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "requirements": {"type": "string"},
-                "filePath": {"type": "string"},
-            },
-        })),
-    Tool(name="datatrust_answer_clarifications",
-        description="[datatrust] Continue a scenario-generation session by answering questions.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "sessionId": {"type": "string"},
-                "answers": {"type": "object", "additionalProperties": {"type": "string"}},
-            },
-            "required": ["sessionId", "answers"],
-        })),
-    Tool(name="datatrust_list_pending_scenarios",
-        description="[datatrust] Show current draft scenarios for a generation session.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"sessionId": {"type": "string"}},
-            "required": ["sessionId"],
-        })),
-    Tool(name="datatrust_confirm_and_create_scenarios",
-        description=(
-            "[datatrust] Deploy generated reconciliation scenarios. DESTRUCTIVE and "
-            "NOT idempotent in intent — it creates persistent scenarios in DataTrust. "
-            "A server-side hard gate blocks creation unless every scenario is fully "
-            "validated: each source/target connection profile must EXIST, be ENABLED "
-            "and have a passing last connection test; every generated SQL must parse "
-            "against its connection; and required inputs (connections, compare/primary "
-            "keys) must be answered. If the gate is not green the call creates NOTHING "
-            "and returns a structured status (validation_required | connection_unresolved "
-            "| sql_invalid | needs_clarification) — resolve those first, do not retry "
-            "blindly. Pass EITHER sessionId OR an explicit scenarios array, never both. "
-            "Only call after explicit user approval."
-        ),
-        annotations=ToolAnnotations(
-            title="Create DataTrust scenarios",
-            destructiveHint=True,
-            idempotentHint=False,
-            readOnlyHint=False,
-            openWorldHint=True,
-        ),
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "sessionId": {"type": "string", "description": "Generation session id from propose_scenarios. Mutually exclusive with 'scenarios'."},
-                "scenarios": {"type": "array", "items": {"type": "object"}, "description": "Explicit scenarios to create. Mutually exclusive with 'sessionId'."},
-                "folderId": {"type": "number"},
-                "runInBackground": {"type": "boolean", "default": True},
-            },
-        })),
-    # ----- DataTrust .NET-native: scenarios / FDR --------------------------
-    Tool(name="datatrust_list_scenarios",
-        description="[datatrust] List DataTrust reconciliation (FDR/validation) scenarios. Optionally filter by name search or folder id.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "folderId": {"type": "number"},
-                "limit": {"type": "number", "default": 25},
-            },
-        })),
-    Tool(name="datatrust_get_scenario",
-        description="[datatrust] Get the definition of one scenario by id (header, type, thresholds, owner, latest session).",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"scenarioId": {"type": "number"}},
-            "required": ["scenarioId"],
-        })),
-    Tool(name="datatrust_run_scenario",
-        description="[datatrust] Execute a scenario now. Returns the new session status. Only call after explicit user approval.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "scenarioId": {"type": "number"},
-                "connectionId": {"type": "string"},
-            },
-            "required": ["scenarioId"],
-        })),
-    Tool(name="datatrust_get_scenario_run_status",
-        description="[datatrust] Recent execution sessions for a scenario, with status code and message.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "scenarioId": {"type": "number"},
-                "limit": {"type": "number", "default": 10},
-            },
-            "required": ["scenarioId"],
-        })),
-    Tool(name="datatrust_get_scenario_exceptions",
-        description="[datatrust] Result/exception summary for a scenario's session(s) (status, message, pass/fail).",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "scenarioId": {"type": "number"},
-                "sessionId": {"type": "number"},
-            },
-            "required": ["scenarioId"],
-        })),
-    # ----- DataTrust .NET-native: query chains -----------------------------
-    Tool(name="datatrust_list_query_chains",
-        description="[datatrust] List query chains in the DataTrust query builder. Optionally filter by name search.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "query": {"type": "string"},
-                "limit": {"type": "number", "default": 25},
-            },
-        })),
-    Tool(name="datatrust_get_query_chain",
-        description="[datatrust] Get one query / query chain by id (name, profile, SQL text, type).",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"queryId": {"type": "number"}},
-            "required": ["queryId"],
-        })),
-    Tool(name="datatrust_run_query_chain",
-        description="[datatrust] Execute a query chain now. Returns the run status. Only call after explicit user approval.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "queryId": {"type": "number"},
-                "connectionId": {"type": "string"},
-            },
-            "required": ["queryId"],
-        })),
-    Tool(name="datatrust_get_query_results",
-        description="[datatrust] Recent execution sessions / results for a query or query chain.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "queryId": {"type": "number"},
-                "limit": {"type": "number", "default": 10},
-            },
-            "required": ["queryId"],
-        })),
-    Tool(name="datatrust_get_source_columns",
-        description="[datatrust] Introspect columns of a source table/view on a connection profile. Use when building a query chain spec.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "connectionProfile": {"type": "string", "description": "Connection profile name (alternative to profileId)."},
-                "profileId": {"type": "number", "description": "Connection profile id (alternative to connectionProfile)."},
-                "tableName": {"type": "string", "description": "Table or view name (catalog.schema.table as required by the source)."},
-                "databaseName": {"type": "string", "description": "Optional database/catalog name."},
-            },
-            "required": ["tableName"],
-        })),
-    Tool(name="datatrust_create_query_chain",
-        description="[datatrust] Create a runnable query chain from a structured spec: source -> optional projection/filter -> RD Output. Deterministic (no LLM). Only call after explicit user approval.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Unique name for the query chain."},
-                "description": {"type": "string", "description": "Optional description."},
-                "folderId": {"type": "number", "description": "Target folder id; 0 uses the user's default folder.", "default": 0},
-                "source": {
-                    "type": "object",
-                    "description": "Source definition.",
-                    "properties": {
-                        "connectionProfile": {"type": "string"},
-                        "profileId": {"type": "number"},
-                        "objectType": {"type": "string", "description": "TableOrViewName | SQL_Text | ExistingQuery."},
-                        "objectName": {"type": "string"},
-                        "columns": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "name": {"type": "string"},
-                                    "dataType": {"type": "string"},
-                                    "isPrimaryKey": {"type": "boolean"},
-                                },
-                            },
-                        },
-                    },
-                },
-                "projection": {
-                    "type": "object",
-                    "properties": {
-                        "columns": {"type": "array", "items": {"type": "string"}},
-                    },
-                },
-                "filter": {
-                    "type": "object",
-                    "properties": {
-                        "expression": {"type": "string", "description": "Filter expression, e.g. amount > 0."},
-                    },
-                },
-                "output": {
-                    "type": "object",
-                    "description": "RD Output (terminal) configuration.",
-                    "properties": {
-                        "metaName": {"type": "string", "description": "Output/snapshot name (required)."},
-                        "outputViewName": {"type": "string", "description": "Optional output view name."},
-                    },
-                    "required": ["metaName"],
-                },
-            },
-            "required": ["name", "source", "output"],
-        })),
-    # ----- DataTrust .NET-native: ETL Test Case Harvester ------------------
-    Tool(name="datatrust_harvest_upload_document",
-        description="[datatrust] Upload an ETL design document (base64) to the DataTrust server for the harvester. Returns a document descriptor for datatrust_harvest_extract.documents[].",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "file_name": {"type": "string", "description": "Original file name incl. extension (xlsx, docx, pdf, pptx, txt, csv)."},
-                "content_base64": {"type": "string", "description": "Base64-encoded file content. A data: URI prefix is also accepted."},
-                "file_type": {"type": "string", "description": "Optional role hint: functional_spec, design_flow, technical_spec, mapping_document, other."},
-                "instructions": {"type": "string", "description": "Optional per-document instructions for the agent."},
-            },
-            "required": ["file_name", "content_base64"],
-        })),
-    Tool(name="datatrust_harvest_extract",
-        description="[datatrust] Start an ETL Test Case Harvester job from ETL design documents. Returns a job id; poll datatrust_harvest_get_job. Long-running — only call after explicit user approval.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "job_name": {"type": "string"},
-                "description": {"type": "string"},
-                "harvest_job_id": {"type": "string", "description": "Optional Supabase harvest job id for DB sync."},
-                "documents": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "file_name": {"type": "string"},
-                            "file_url": {"type": "string"},
-                            "file_type": {"type": "string"},
-                            "instructions": {"type": "string"},
-                        },
-                    },
-                },
-                "reconciliation_types": {"type": "array", "items": {"type": "string"}},
-                "job_instructions": {"type": "string"},
-                "source_database": {"type": "string"},
-                "target_database": {"type": "string"},
-                "source_connection_profile": {"type": "string"},
-                "target_connection_profile": {"type": "string"},
-                "do_comparison_on_source": {"type": "boolean"},
-                "limit_exceptions": {"type": "string"},
-            },
-            "required": ["job_name", "documents"],
-        })),
-    Tool(name="datatrust_harvest_submit_clarifications",
-        description="[datatrust] Resume a harvest job waiting for clarification. Provide answers keyed by question id.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "job_id": {"type": "string"},
-                "clarificationAnswers": {"type": "object", "additionalProperties": {"type": "string"}},
-            },
-            "required": ["job_id", "clarificationAnswers"],
-        })),
-    Tool(name="datatrust_harvest_get_job",
-        description="[datatrust] Get status, progress, and generated scenarios (result_data) of a harvest job by id.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"jobId": {"type": "string"}},
-            "required": ["jobId"],
-        })),
-    Tool(name="datatrust_harvest_get_job_logs",
-        description="[datatrust] Get the structured log stream for a harvest job by id.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {"jobId": {"type": "string"}},
-            "required": ["jobId"],
-        })),
-    # ----- DataTrust .NET-native: data quality execution -------------------
-    Tool(name="datatrust_run_dq_job",
-        description="[datatrust] Trigger a Data Quality job (submitted to the execution engine). Only call after explicit user approval.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "jobId": {"type": "number"},
-                "connectionId": {"type": "string"},
-            },
-            "required": ["jobId"],
-        })),
-    Tool(name="datatrust_get_dq_job_status",
-        description="[datatrust] Status / latest run result of a Data Quality job. Pass runId for a specific run, else returns the summary.",
-        inputSchema=_augment_schema({
-            "type": "object",
-            "properties": {
-                "jobId": {"type": "number"},
-                "runId": {"type": "number"},
-            },
-            "required": ["jobId"],
-        })),
-    Tool(name="datatrust_summarize_object_health",
+        },
+    ),
+    Tool(
+        name="datatrust_summarize_object_health",
         description="[datatrust] Composite health report: score + failing rules + drift.",
         inputSchema=_augment_schema({
             "type": "object",
@@ -699,8 +373,126 @@ TOOLS: list[Tool] = [
                 "drift_days": {"type": "number", "default": 30},
             },
             "required": ["objectName"],
-        })),
+        }),
+    ),
 ]
+
+
+def merge_gateway_catalog(gateway_tools: list[Tool]) -> list[Tool]:
+    """Prepend client-local tools and drop gateway rows that collide on name.
+
+    This is the dynamic catalog path used by list_tools(); verify_tool_catalog
+    asserts that this merge helper exists.
+    """
+    local_names = {t.name for t in CLIENT_LOCAL_TOOLS}
+    merged = list(CLIENT_LOCAL_TOOLS)
+    for tool in gateway_tools:
+        if tool.name in local_names:
+            continue
+        merged.append(tool)
+    return merged
+
+
+def resolve_gateway_tool_name(name: str) -> str:
+    """Map legacy client names to gateway-canonical names when needed."""
+    return TOOL_NAME_ALIASES.get(name, name)
+
+
+async def _http_get_gateway_tools(client: httpx.AsyncClient, env: cfg.Environment) -> list[Tool]:
+    """GET {dotnet}/api/mcp/v1/tools/list and build Tool objects."""
+    await _ensure_token(env)
+    url = f"{env.dotnet_url}/api/mcp/v1/tools/list"
+
+    async def _attempt() -> httpx.Response:
+        return await client.get(
+            url,
+            headers=_auth_headers(env),
+            follow_redirects=False,
+        )
+
+    try:
+        resp = await _attempt()
+    except httpx.RequestError as exc:
+        raise RuntimeError(f"tools/list unreachable at {url}: {exc}") from exc
+
+    if _looks_like_auth_failure(resp):
+        _invalidate_session(env)
+        await _ensure_token(env)
+        try:
+            resp = await _attempt()
+        except httpx.RequestError as exc:
+            raise RuntimeError(f"tools/list unreachable at {url}: {exc}") from exc
+
+    if _looks_like_auth_failure(resp):
+        raise RuntimeError(
+            f"tools/list auth failure for '{env.label}' (HTTP {resp.status_code})"
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(f"tools/list returned {resp.status_code}: {resp.text[:300]}")
+
+    try:
+        body = resp.json()
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"tools/list non-JSON from '{env.label}'") from exc
+
+    rows = body.get("tools") if isinstance(body, dict) else None
+    if not isinstance(rows, list):
+        raise RuntimeError(f"tools/list missing tools[] from '{env.label}'")
+
+    return [_tool_from_gateway_dict(row) for row in rows if isinstance(row, dict) and row.get("name")]
+
+
+async def fetch_gateway_tools_for_env(env: cfg.Environment | None = None) -> list[Tool]:
+    """Fetch (or return cached) gateway tools for an environment."""
+    global _last_good_catalog
+    if env is None:
+        env = cfg.load_registry().get(None)
+
+    now = asyncio.get_running_loop().time()
+    cached = _catalog_cache.get(env.name)
+    if cached and cached[0] > now:
+        return list(cached[1])
+
+    async with _catalog_lock:
+        cached = _catalog_cache.get(env.name)
+        now = asyncio.get_running_loop().time()
+        if cached and cached[0] > now:
+            return list(cached[1])
+
+        async with httpx.AsyncClient(timeout=min(HTTP_TIMEOUT, 30.0), verify=oauth.verify_tls()) as client:
+            tools = await _http_get_gateway_tools(client, env)
+        _catalog_cache[env.name] = (now + _CATALOG_TTL_SEC, tools)
+        _last_good_catalog = list(tools)
+        return list(tools)
+
+
+async def build_merged_tools(env: cfg.Environment | None = None) -> list[Tool]:
+    """Live gateway catalog + client-local tools, with offline fallback.
+
+    Preference order:
+      1. Fresh / cached GET tools/list for the active env
+      2. Last-good catalog from this process
+      3. Embedded GATEWAY_TOOLS_SNAPSHOT (stdlib server still starts offline)
+    """
+    global _last_good_catalog
+    try:
+        gateway = await fetch_gateway_tools_for_env(env)
+        return merge_gateway_catalog(gateway)
+    except Exception as exc:
+        print(
+            f"[datatrust-mcp] WARNING: tools/list failed ({exc}); "
+            "falling back to cached/static gateway catalog.",
+            file=sys.stderr,
+            flush=True,
+        )
+        if _last_good_catalog:
+            return merge_gateway_catalog(list(_last_good_catalog))
+        return merge_gateway_catalog(_static_gateway_tools())
+
+
+# Backward-compatible name: static merge used when offline / for import-time
+# inspection. Prefer build_merged_tools() at runtime.
+TOOLS: list[Tool] = merge_gateway_catalog(_static_gateway_tools())
 
 
 # ---------------------------------------------------------------------------
@@ -709,7 +501,7 @@ TOOLS: list[Tool] = [
 
 @server.list_tools()
 async def list_tools() -> list[Tool]:
-    return TOOLS
+    return await build_merged_tools()
 
 
 def _resolve_env(args: dict[str, Any]) -> tuple[cfg.Environment, dict[str, Any]]:
@@ -723,7 +515,7 @@ def _resolve_env(args: dict[str, Any]) -> tuple[cfg.Environment, dict[str, Any]]
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
-    # Local-only meta tools never hit the FastAPI
+    # Local-only meta tools never hit the gateway
     if name == "list_environments":
         result = await _list_environments()
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
@@ -734,19 +526,19 @@ async def call_tool(name: str, arguments: dict[str, Any]) -> list[TextContent]:
     env, args = _resolve_env(arguments)
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, verify=oauth.verify_tls()) as client:
-        if name in PASSTHROUGH:
-            result = await _call_upstream(client, env, name, args)
-            # Tag every response with the env it served so the LLM never has
-            # to guess where the data came from.
-            if isinstance(result, dict):
-                result.setdefault("environment", env.name)
-            return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
-
         if name == "datatrust_summarize_object_health":
             result = await _summarize(client, env, args)
             return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
-        raise ValueError(f"Unknown tool: {name}")
+        # Everything else is a gateway passthrough. Resolve legacy aliases
+        # to gateway-canonical names before the upstream call.
+        gateway_name = resolve_gateway_tool_name(name)
+        result = await _call_upstream(client, env, gateway_name, args)
+        if isinstance(result, dict):
+            result.setdefault("environment", env.name)
+            if gateway_name != name:
+                result.setdefault("resolved_tool", gateway_name)
+        return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
 
 async def _summarize(client: httpx.AsyncClient, env: cfg.Environment, args: dict[str, Any]) -> dict[str, Any]:

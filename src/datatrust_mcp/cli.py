@@ -68,6 +68,14 @@ def _installed_binary() -> str:
     )
 
 
+def _installed_binary_best_effort() -> str | None:
+    """Locate the launcher without failing setup when PATH is incomplete."""
+    try:
+        return _installed_binary()
+    except RuntimeError:
+        return None
+
+
 def _claude_desktop_config() -> Path:
     # macOS
     p = HOME / "Library/Application Support/Claude/claude_desktop_config.json"
@@ -586,7 +594,17 @@ def cmd_setup(args) -> int:
         print(line)
     print()
     print("[datatrust-mcp setup] done")
-    print(f"  Binary: {_installed_binary()}")
+    binary = _installed_binary_best_effort()
+    if binary:
+        print(f"  Binary: {binary}")
+    else:
+        print(
+            "  WARNING: datatrust-mcp binary not found on PATH or next to "
+            "this Python. Environments file was written successfully; "
+            "AI-client registration may have been skipped. Install with "
+            "`pip install -e .` (or the published package) and re-run setup "
+            "to register clients."
+        )
     print(f"  Config: {saved}")
     if _INSTALL_ENV:
         print(
