@@ -70,9 +70,23 @@ Invoking `datatrust-mcp` with no args starts the stdio MCP server (what AI clien
 
 Tools follow the `<product>_<verb>_<object>` convention: common foundation tools have no prefix (`search_assets`, `list_connections`, `get_workspace_summary`), DataTrust tools use the `datatrust_` prefix, and RightSight tools use the `rightsight_` prefix.
 
-The stdio client exposes **35 tools** — the same names as the DataTrust gateway merged catalog (14 Python + 18 .NET-native) plus `list_environments`, `switch_default_environment`, and the client-local composite `datatrust_summarize_object_health`. Run `python scripts/verify_tool_catalog.py` after adding tools to confirm parity with the gateway.
+The stdio client merges the live gateway catalog (**45 tools** from `GET /api/mcp/v1/tools/list`, gateway-canonical names) with three client-local tools: `list_environments`, `switch_default_environment`, and `datatrust_summarize_object_health`. An offline snapshot in `_gateway_tools_snapshot.py` is the fallback when live fetch is unavailable. Run `python scripts/verify_tool_catalog.py` (and `--offline`) after catalog changes to confirm parity.
 
 Every tool accepts optional `environment` (e.g. `"prod"`). Omit to use the default.
+
+## Test Case Harvester agent
+
+**Purpose:** drive the ETL Test Case Harvester end-to-end through MCP — upload design docs, extract proposed reconciliation scenarios, answer clarifications, poll job status/logs, then request a **coverage report** against the spec.
+
+Use **gateway-canonical** tool names from live `tools/list` (the client does not invent aliases for these). Typical sequence:
+
+1. **`datatrust_harvest_upload_document`** — required `file_name`, `content_base64`; optional `file_type`, `instructions`. Returns a document descriptor for `documents[]`.
+2. **`datatrust_harvest_extract`** — required `job_name`, `documents` (from upload or reachable `file_url`); optional reconciliation types, connection profile / dialect hints, `job_instructions`. Returns a harvest `job_id`. Long-running / LLM-backed — only after explicit user approval.
+3. **`datatrust_harvest_submit_clarifications`** (if needed) — required `job_id`, `clarificationAnswers` (map of question id → answer) when the job is waiting on clarifications.
+4. **`datatrust_harvest_get_job`** / **`datatrust_harvest_get_job_logs`** — poll with `jobId` for status, progress, `result_data`, and structured logs.
+5. **`datatrust_harvest_coverage_report`** — required `job_id`; optional `recon_only` (default true). Call after proposed scenarios are available; returns a coverage matrix / gap flags (reconciliation-only in v1). Does not re-upload or re-extract.
+
+Harvester work is API/tool oriented. If any DB-backed guidance appears elsewhere, assume **both Postgres and SQL Server** (dual-DB standing standard) and avoid dialect-specific SQL in agent playbooks.
 
 ## Security model
 
